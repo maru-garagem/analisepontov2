@@ -2,7 +2,7 @@
 builder = "DOCKERFILE"
 
 [deploy]
-startCommand = "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port $PORT"
+# startCommand não é definido: o CMD do Dockerfile (entrypoint.py) é usado.
 healthcheckPath = "/api/health"
 healthcheckTimeout = 100
 restartPolicyType = "ON_FAILURE"
