@@ -15,10 +15,15 @@ from typing import Any
 
 from app.config import get_settings
 from app.services.identificacao import validar_cnpj
-from app.services.llm import encode_image_base64, get_llm_client, message_with_image
+from app.services.llm import (
+    LLMImageUnsupportedError,
+    encode_image_base64,
+    get_llm_client,
+    message_with_image,
+)
 from app.utils.errors import LLMUnavailableError, NotACardPontoError, PontoExtractError
 from app.utils.ocr import rasterizar
-from app.utils.pdf import extrair_texto_todo
+from app.utils.pdf import extrair_texto_todo, parece_pdf_escaneado
 
 logger = logging.getLogger(__name__)
 
@@ -148,30 +153,7 @@ def gerar_proposta(pdf_bytes: bytes, modelo: str | None = None) -> Proposta:
     Levanta NotACardPontoError se o modelo identificar que o documento não
     é cartão de ponto.
     """
-    # 1. Rasteriza primeira página
-    imagens = rasterizar(pdf_bytes, dpi=150, first_page=1, last_page=1)
-    if not imagens:
-        raise PontoExtractError("Falha ao rasterizar primeira página do PDF.")
-
-    buf = BytesIO()
-    imagens[0].save(buf, format="PNG")
-    image_data_url = encode_image_base64(buf.getvalue(), mime="image/png")
-
-    # 2. Texto digital (complemento à imagem)
-    textos = extrair_texto_todo(pdf_bytes)
-    texto_primeira = (textos[0] if textos else "")[:8000]
-
-    user_prompt = (
-        "Texto extraído pela camada digital do PDF (pode estar vazio se for escaneado):\n"
-        f"```\n{texto_primeira}\n```\n\n"
-        "Analise a imagem da primeira página e o texto acima, e retorne a proposta JSON exigida."
-    )
-
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        message_with_image(user_prompt, image_data_url),
-    ]
-
+    # 1. Escolhe modelo efetivo e detecta se suporta visão
     settings = get_settings()
     modelo_escolhido = modelo if modelo in settings.modelos_potentes_permitidos else None
     modelo_efetivo = modelo_escolhido or settings.OPENROUTER_MODEL_POTENTE
@@ -180,18 +162,82 @@ def gerar_proposta(pdf_bytes: bytes, modelo: str | None = None) -> Proposta:
             "modelo_fora_whitelist solicitado=%s caindo_no_default=%s",
             modelo, modelo_efetivo,
         )
+    suporta_visao = settings.modelo_suporta_visao(modelo_efetivo)
+
+    # 2. Texto digital do PDF
+    textos = extrair_texto_todo(pdf_bytes)
+    texto_primeira = (textos[0] if textos else "")[:8000]
+    pdf_eh_escaneado = parece_pdf_escaneado(pdf_bytes)
+
+    # 3. Se o PDF é escaneado mas o modelo é text-only, erro claro — texto
+    # extraído provavelmente está vazio ou lixo.
+    if pdf_eh_escaneado and not suporta_visao:
+        raise PontoExtractError(
+            f"Este PDF parece ser escaneado (pouco texto digital) e o modelo "
+            f"'{modelo_efetivo}' não suporta imagens. Escolha um modelo com "
+            f"visão (Claude, GPT-4/5, Gemini) ou envie um PDF digital."
+        )
+
     client = get_llm_client()
 
-    try:
-        # Usa chat (não chat_json) para ter acesso ao usage — parseamos o
-        # JSON manualmente após validar a existência dos campos obrigatórios.
-        resposta = client.chat(
+    def _chamar(com_imagem: bool) -> dict:
+        if com_imagem:
+            imagens = rasterizar(pdf_bytes, dpi=150, first_page=1, last_page=1)
+            if not imagens:
+                raise PontoExtractError("Falha ao rasterizar primeira página do PDF.")
+            buf = BytesIO()
+            imagens[0].save(buf, format="PNG")
+            image_data_url = encode_image_base64(buf.getvalue(), mime="image/png")
+            user_prompt = (
+                "Texto extraído pela camada digital do PDF (pode estar vazio se for escaneado):\n"
+                f"```\n{texto_primeira}\n```\n\n"
+                "Analise a imagem da primeira página e o texto acima, e retorne a proposta JSON exigida."
+            )
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                message_with_image(user_prompt, image_data_url),
+            ]
+        else:
+            user_prompt = (
+                "Analise o texto abaixo (extraído pela camada digital do PDF) e "
+                "retorne a proposta JSON exigida. Você NÃO receberá imagem — "
+                "baseie-se apenas no texto.\n\n"
+                f"```\n{texto_primeira}\n```"
+            )
+            messages = [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+
+        return client.chat(
             model=modelo_efetivo,
             messages=messages,
             max_tokens=4000,
             temperature=0.1,
             response_format={"type": "json_object"},
         )
+
+    try:
+        if suporta_visao:
+            resposta = _chamar(com_imagem=True)
+        else:
+            resposta = _chamar(com_imagem=False)
+    except LLMImageUnsupportedError:
+        # Surpresa — catálogo dizia que suporta mas o provider rejeitou.
+        # Atualizar catálogo e tentar só-texto.
+        logger.warning(
+            "modelo_rejeitou_imagem modelo=%s fallback_para_texto_only",
+            modelo_efetivo,
+        )
+        if pdf_eh_escaneado:
+            raise PontoExtractError(
+                f"O modelo '{modelo_efetivo}' rejeitou a imagem e o PDF é "
+                f"escaneado. Escolha outro modelo com visão."
+            )
+        try:
+            resposta = _chamar(com_imagem=False)
+        except LLMUnavailableError:
+            raise
     except LLMUnavailableError:
         raise
     except Exception as exc:  # pragma: no cover

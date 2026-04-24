@@ -20,7 +20,13 @@ from typing import Any, Iterable, Literal
 import httpx
 
 from app.config import get_settings
-from app.utils.errors import LLMUnavailableError
+from app.utils.errors import LLMUnavailableError, PontoExtractError
+
+
+class LLMImageUnsupportedError(PontoExtractError):
+    """Modelo chamado não aceita input de imagem — retry só com texto pode ser tentado."""
+    http_status = 422
+    code = "llm_sem_visao"
 
 logger = logging.getLogger(__name__)
 
@@ -82,9 +88,18 @@ class LLMClient:
             except httpx.HTTPStatusError as exc:
                 # 4xx é "não adianta tentar de novo" (exceto 429 rate limit do provedor).
                 if exc.response.status_code != 429 and 400 <= exc.response.status_code < 500:
-                    logger.error("llm_4xx status=%s body=%s", exc.response.status_code, exc.response.text[:500])
+                    body_txt = exc.response.text[:1000]
+                    logger.error("llm_4xx status=%s body=%s", exc.response.status_code, body_txt)
+                    # Caso especial: modelo não suporta imagem. Diferenciamos
+                    # para que o chamador possa fazer retry sem a imagem.
+                    if (
+                        "image input" in body_txt.lower()
+                        or "does not support image" in body_txt.lower()
+                        or "image_url" in body_txt.lower()
+                    ):
+                        raise LLMImageUnsupportedError(body_txt) from exc
                     raise LLMUnavailableError(
-                        f"LLM retornou {exc.response.status_code}"
+                        f"LLM retornou {exc.response.status_code}: {body_txt[:200]}"
                     ) from exc
                 last_exc = exc
                 logger.warning("llm_retry attempt=%d status=%s", attempt, exc.response.status_code)

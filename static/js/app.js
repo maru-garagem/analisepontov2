@@ -36,8 +36,11 @@
     const data = await App.apiJson('/api/extract/modelos-disponiveis');
     for (const m of data.modelos || []) {
       const opt = document.createElement('option');
-      opt.value = m;
-      opt.textContent = m + (m === data.padrao ? '  (padrão)' : '');
+      opt.value = m.id;
+      const anotacoes = [];
+      if (m.id === data.padrao) anotacoes.push('padrão');
+      if (m.suporta_visao === false) anotacoes.push('sem visão — só PDF digital');
+      opt.textContent = m.id + (anotacoes.length ? ` (${anotacoes.join(', ')})` : '');
       modeloSelect.appendChild(opt);
     }
   } catch {}

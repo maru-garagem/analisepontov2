@@ -150,13 +150,12 @@ def iniciar_extracao(
 @router.get("/modelos-disponiveis")
 def modelos_disponiveis(auth: dict = Depends(require_auth)) -> dict[str, Any]:
     """
-    Retorna a whitelist de modelos potentes que o usuário pode escolher
-    no dropdown da tela de upload. Frontend popula o <select> a partir
-    daqui para não hardcodar a lista em 2 lugares.
+    Retorna o catálogo de modelos potentes (id + suporta_visao) para o
+    frontend popular o dropdown sem hardcodar 2 vezes.
     """
     settings = get_settings()
     return {
-        "modelos": settings.modelos_potentes_permitidos,
+        "modelos": settings.modelos_potentes_catalogo,
         "padrao": settings.OPENROUTER_MODEL_POTENTE,
     }
 

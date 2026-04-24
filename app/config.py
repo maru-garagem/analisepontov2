@@ -39,19 +39,32 @@ class Settings(BaseSettings):
 
     # Modelos que o usuário pode escolher na tela de upload para o cadastro
     # assistido. Whitelist para evitar uso de modelos arbitrários (risco de
-    # custo). Se precisar adicionar, edite esta lista.
+    # custo). `suporta_visao` controla se o PDF vai como imagem (PDFs
+    # escaneados) ou só como texto. Se precisar adicionar, edite esta lista.
+    @property
+    def modelos_potentes_catalogo(self) -> list[dict[str, object]]:
+        return [
+            {"id": "anthropic/claude-opus-4.7", "suporta_visao": True},
+            {"id": "anthropic/claude-sonnet-4.6", "suporta_visao": True},
+            {"id": "openai/gpt-5.4", "suporta_visao": True},
+            {"id": "openai/gpt-5.4-mini", "suporta_visao": True},
+            {"id": "google/gemini-3-flash-preview", "suporta_visao": True},
+            {"id": "deepseek/deepseek-v4-pro", "suporta_visao": False},
+            {"id": "x-ai/grok-4.1-fast", "suporta_visao": False},
+            {"id": "x-ai/grok-4-fast", "suporta_visao": False},
+        ]
+
     @property
     def modelos_potentes_permitidos(self) -> list[str]:
-        return [
-            "anthropic/claude-opus-4.7",
-            "anthropic/claude-sonnet-4.6",
-            "openai/gpt-5.4",
-            "openai/gpt-5.4-mini",
-            "google/gemini-3-flash-preview",
-            "deepseek/deepseek-v4-pro",
-            "x-ai/grok-4.1-fast",
-            "x-ai/grok-4-fast",
-        ]
+        return [m["id"] for m in self.modelos_potentes_catalogo]
+
+    def modelo_suporta_visao(self, modelo: str) -> bool:
+        for m in self.modelos_potentes_catalogo:
+            if m["id"] == modelo:
+                return bool(m["suporta_visao"])
+        # Modelo fora do catálogo (usando default do env): assume que suporta
+        # visão — os defaults padrão (Grok-4, GPT-4o) historicamente suportam.
+        return True
 
     # --- Uploads ---
     MAX_UPLOAD_SIZE_MB: int = 20
