@@ -1,16 +1,17 @@
 """
-Entrypoint da aplicação FastAPI. Monta middlewares, registra routers e
-expõe a app como `main:app` para o uvicorn.
+Entrypoint da aplicação FastAPI.
 """
 from __future__ import annotations
 
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.routes import health
+from app.routes import auth, health
+from app.utils.security import SESSION_COOKIE_NAME, verify_session_token
 
 settings = get_settings()
 
@@ -37,6 +38,32 @@ if settings.allowed_origins_list:
         allow_headers=["*"],
     )
 
-app.include_router(health.router, prefix="/api")
 
-# Static files e outros routers são montados nas fases seguintes.
+_PUBLIC_API_PATHS = {"/api/health"}
+_PUBLIC_API_PREFIXES = ("/api/auth/",)
+
+
+@app.middleware("http")
+async def auth_gate(request: Request, call_next):
+    """
+    Protege todas as rotas /api/* exceto health e auth. Rotas não-/api/*
+    (static, docs em dev, etc) passam livremente.
+    """
+    path = request.url.path
+    if not path.startswith("/api/"):
+        return await call_next(request)
+    if path in _PUBLIC_API_PATHS or any(path.startswith(p) for p in _PUBLIC_API_PREFIXES):
+        return await call_next(request)
+
+    token = request.cookies.get(SESSION_COOKIE_NAME)
+    if token and verify_session_token(token) is not None:
+        return await call_next(request)
+
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Não autenticado."},
+    )
+
+
+app.include_router(health.router, prefix="/api")
+app.include_router(auth.router, prefix="/api")
