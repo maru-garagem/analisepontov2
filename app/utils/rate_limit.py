@@ -42,3 +42,7 @@ class RateLimiter:
 
 # 5 tentativas de login em 15 minutos por IP.
 login_limiter = RateLimiter(max_events=5, window_seconds=15 * 60)
+
+# 30 uploads em 10 minutos por IP — proteção contra loop/erro que queimaria
+# créditos de LLM. Ajustável via env se virar limite real.
+upload_limiter = RateLimiter(max_events=30, window_seconds=10 * 60)

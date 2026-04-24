@@ -32,9 +32,14 @@
     const tbody = t.querySelector('tbody');
     for (const e of data) {
       const tr = document.createElement('tr');
-      tr.className = 'border-t border-slate-200';
+      tr.className = 'border-t border-slate-200 hover:bg-slate-50 cursor-pointer';
+      tr.addEventListener('click', () => {
+        location.href = `/empresa-detalhe.html?id=${e.id}`;
+      });
       tr.innerHTML = `
-        <td class="px-3 py-2">${escapeHtml(e.nome || '—')}</td>
+        <td class="px-3 py-2">
+          <a href="/empresa-detalhe.html?id=${e.id}" class="text-blue-700 hover:underline">${escapeHtml(e.nome || '—')}</a>
+        </td>
         <td class="px-3 py-2 font-mono text-xs">${(e.cnpjs || []).map(escapeHtml).join('<br>')}</td>
         <td class="px-3 py-2">${e.total_esqueletos ?? 0}</td>
         <td class="px-3 py-2">${typeof e.taxa_sucesso_media === 'number' ? Math.round(e.taxa_sucesso_media * 100) + '%' : '—'}</td>

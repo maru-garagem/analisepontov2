@@ -8,7 +8,9 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Response, UploadFile, status
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, Response, UploadFile, status
 
 from app.config import get_settings
 from app.database import SessionLocal
@@ -29,6 +31,7 @@ from app.services.conformidade import atualizar_metricas_esqueleto, calcular_sco
 from app.services.extracao_esqueleto import aplicar_esqueleto
 from app.services.identificacao import formatar_cnpj, normalizar_cnpj, validar_cnpj
 from app.tasks.processamento import processar_em_background
+from app.utils.rate_limit import upload_limiter
 from app.utils.errors import (
     PDFInvalidError,
     PDFPasswordProtectedError,
@@ -48,8 +51,27 @@ def _parse_uuid(raw: str) -> uuid.UUID:
         raise HTTPException(status_code=400, detail="ID inválido.")
 
 
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _validar_webhook_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(
+            status_code=400,
+            detail="webhook_url deve ser URL absoluta com esquema http ou https.",
+        )
+
+
 @router.post("", response_model=ExtractStartResponse)
 def iniciar_extracao(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     id_processo: str | None = Form(default=None),
@@ -57,6 +79,13 @@ def iniciar_extracao(
     auth: dict = Depends(require_auth),
 ) -> ExtractStartResponse:
     settings = get_settings()
+
+    ip = _client_ip(request)
+    if not upload_limiter.check_and_record(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Limite de uploads atingido. Aguarde e tente novamente.",
+        )
 
     # Valida content-type e tamanho
     if file.content_type not in ("application/pdf", "application/octet-stream", None):
@@ -339,6 +368,7 @@ def cadastro_confirmar(
 
 @router.post("-api", response_model=ApiExtractExternalResponse)
 def extract_api_externa(
+    request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     id_processo: str | None = Form(default=None),
@@ -367,12 +397,20 @@ def extract_api_externa(
     except PDFInvalidError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
+    ip = _client_ip(request)
+    if not upload_limiter.check_and_record(ip):
+        raise HTTPException(
+            status_code=429,
+            detail="Limite de uploads atingido. Aguarde e tente novamente.",
+        )
+
     effective_webhook = webhook_url or settings.DEFAULT_WEBHOOK_URL
     if not effective_webhook:
         raise HTTPException(
             status_code=400,
             detail="webhook_url obrigatório (no form ou DEFAULT_WEBHOOK_URL).",
         )
+    _validar_webhook_url(effective_webhook)
 
     db = SessionLocal()
     try:
