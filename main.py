@@ -62,7 +62,8 @@ _CSP = (
     "img-src 'self' data: blob:; "
     "font-src 'self' data:; "
     "connect-src 'self' https://cdn.jsdelivr.net; "
-    "worker-src 'self' blob: https://cdn.jsdelivr.net; "
+    # Permitir iframe interno com blob: (preview de PDF usa viewer nativo do navegador).
+    "frame-src 'self' blob:; "
     "child-src 'self' blob:; "
     "frame-ancestors 'none';"
 )

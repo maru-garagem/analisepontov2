@@ -1,12 +1,11 @@
-// Cadastro assistido: carrega proposta, renderiza PDF com PDF.js (esperando
-// window.pdfjsLib carregar via ESM), e expõe state via Alpine.
+// Cadastro assistido: carrega proposta e mostra PDF via iframe com blob URL
+// (viewer nativo do navegador — simples e sem dependência de PDF.js).
 
 function cadastroApp() {
   return {
     processingId: null,
-    pdfDoc: null,
-    paginaAtual: 1,
-    totalPaginas: 0,
+    pdfUrl: null,
+    erroPdf: null,
     empresa_candidata_id: null,
     empresa_candidata_nome: null,
     usarEmpresaExistente: false,
@@ -64,7 +63,7 @@ function cadastroApp() {
       this.confianca = proposta.confianca ?? null;
       this.estruturaTexto = JSON.stringify(proposta.estrutura || {}, null, 2);
 
-      // Watch JSON válido
+      // Valida JSON em tempo real
       this.$watch('estruturaTexto', (v) => {
         try {
           JSON.parse(v);
@@ -75,67 +74,34 @@ function cadastroApp() {
       });
 
       // Carrega PDF
-      try {
-        await this.carregarPDF();
-      } catch (err) {
-        App.toast('Falha ao carregar PDF: ' + err.message, 'error');
-      }
+      await this.carregarPDF();
     },
 
     async carregarPDF() {
-      // Aguarda pdfjsLib do ESM module (pode levar ~1s pra carregar CDN)
-      let tentativas = 0;
-      while (!window.pdfjsLib && tentativas < 40) {
-        await new Promise((r) => setTimeout(r, 100));
-        tentativas++;
+      this.erroPdf = null;
+      // Libera blob URL anterior, se existir, antes de criar outra.
+      if (this.pdfUrl) {
+        try { URL.revokeObjectURL(this.pdfUrl); } catch {}
+        this.pdfUrl = null;
       }
-      if (!window.pdfjsLib) {
-        throw new Error(
-          'PDF.js não carregou — CDN bloqueada? Veja o Console (F12) para detalhes.'
-        );
-      }
-      console.log('[cadastro] PDF.js carregado, buscando bytes do PDF...');
-
-      const resp = await fetch(`/api/extract/${this.processingId}/pdf`, {
-        credentials: 'same-origin',
-      });
-      if (!resp.ok) {
-        if (resp.status === 404) {
-          throw new Error('PDF expirou (TTL 1h). Reenvie o arquivo.');
-        }
-        throw new Error('HTTP ' + resp.status + ' ao baixar PDF.');
-      }
-      const buf = await resp.arrayBuffer();
-      console.log('[cadastro] bytes recebidos:', buf.byteLength);
 
       try {
-        this.pdfDoc = await window.pdfjsLib.getDocument({ data: buf }).promise;
+        const resp = await fetch(`/api/extract/${this.processingId}/pdf`, {
+          credentials: 'same-origin',
+        });
+        if (!resp.ok) {
+          if (resp.status === 404) {
+            throw new Error('PDF expirou (TTL 1h). Reenvie o arquivo.');
+          }
+          throw new Error('HTTP ' + resp.status + ' ao baixar PDF.');
+        }
+        const blob = await resp.blob();
+        this.pdfUrl = URL.createObjectURL(blob);
+        console.log('[cadastro] PDF carregado,', blob.size, 'bytes');
       } catch (err) {
-        console.error('[cadastro] erro do PDF.js:', err);
-        throw new Error('PDF.js falhou ao parsear: ' + (err.message || err));
+        console.error('[cadastro] erro ao carregar PDF:', err);
+        this.erroPdf = err.message;
       }
-      this.totalPaginas = this.pdfDoc.numPages;
-      console.log('[cadastro] PDF com', this.totalPaginas, 'página(s)');
-      await this.renderizarPagina(1);
-    },
-
-    async renderizarPagina(n) {
-      if (!this.pdfDoc) return;
-      const page = await this.pdfDoc.getPage(n);
-      const canvas = document.getElementById('pdfCanvas');
-      const ctx = canvas.getContext('2d');
-      const viewport = page.getViewport({ scale: 1.3 });
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      await page.render({ canvasContext: ctx, viewport }).promise;
-      this.paginaAtual = n;
-    },
-
-    paginaAnterior() {
-      if (this.paginaAtual > 1) this.renderizarPagina(this.paginaAtual - 1);
-    },
-    proximaPagina() {
-      if (this.paginaAtual < this.totalPaginas) this.renderizarPagina(this.paginaAtual + 1);
     },
 
     adicionarCnpj() {
@@ -170,8 +136,10 @@ function cadastroApp() {
           payload
         );
         App.toast('Esqueleto salvo. Extraindo...', 'success');
-        // Volta para o dashboard exibindo o resultado via sessionStorage
         sessionStorage.setItem('ultimo_resultado', JSON.stringify(res));
+        if (this.pdfUrl) {
+          try { URL.revokeObjectURL(this.pdfUrl); } catch {}
+        }
         location.href = '/';
       } catch (err) {
         App.toast('Erro ao confirmar: ' + err.message, 'error');
@@ -187,6 +155,9 @@ function cadastroApp() {
         );
       } catch {
         // ignora — já saindo
+      }
+      if (this.pdfUrl) {
+        try { URL.revokeObjectURL(this.pdfUrl); } catch {}
       }
       location.href = '/';
     },

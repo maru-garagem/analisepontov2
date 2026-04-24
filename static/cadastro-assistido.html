@@ -21,18 +21,42 @@
     x-init="init()"
     class="max-w-7xl mx-auto px-6 py-6 grid grid-cols-1 lg:grid-cols-2 gap-6"
   >
-    <!-- ESQUERDA: PDF preview -->
+    <!-- ESQUERDA: PDF preview via iframe -->
     <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
       <div class="flex items-center justify-between mb-3">
         <h2 class="font-medium">Pré-visualização do PDF</h2>
-        <div class="text-sm text-slate-500">
-          Página <span x-text="paginaAtual"></span> / <span x-text="totalPaginas"></span>
-          <button @click="paginaAnterior()" class="ml-3 px-2 border rounded disabled:opacity-40" :disabled="paginaAtual <= 1">‹</button>
-          <button @click="proximaPagina()" class="px-2 border rounded disabled:opacity-40" :disabled="paginaAtual >= totalPaginas">›</button>
-        </div>
+        <a
+          x-show="pdfUrl"
+          :href="pdfUrl"
+          target="_blank"
+          rel="noopener"
+          class="text-sm text-blue-700 hover:underline"
+        >Abrir em nova aba</a>
       </div>
-      <div class="bg-slate-100 rounded overflow-auto" style="max-height: 80vh;">
-        <canvas id="pdfCanvas" class="block mx-auto"></canvas>
+      <div class="bg-slate-100 rounded overflow-hidden" style="height: 80vh;">
+        <template x-if="!pdfUrl && !erroPdf">
+          <div class="flex items-center justify-center h-full text-slate-500 text-sm">
+            Carregando PDF...
+          </div>
+        </template>
+        <template x-if="erroPdf">
+          <div class="flex items-center justify-center h-full p-4 text-center">
+            <div>
+              <p class="text-red-600 font-medium mb-2">Falha ao carregar PDF</p>
+              <p class="text-sm text-slate-600" x-text="erroPdf"></p>
+              <button
+                @click="carregarPDF()"
+                class="mt-3 px-3 py-1 text-sm rounded bg-blue-600 text-white hover:bg-blue-700"
+              >Tentar de novo</button>
+            </div>
+          </div>
+        </template>
+        <iframe
+          x-show="pdfUrl"
+          :src="pdfUrl"
+          class="w-full h-full border-0"
+          title="Preview do PDF"
+        ></iframe>
       </div>
     </section>
 
@@ -146,14 +170,6 @@
       </div>
     </section>
   </main>
-
-  <!-- PDF.js via CDN -->
-  <script type="module">
-    import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.mjs';
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs';
-    window.pdfjsLib = pdfjsLib;
-  </script>
 
   <script src="/js/cadastro.js"></script>
 </body>
