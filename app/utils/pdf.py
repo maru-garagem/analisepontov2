@@ -18,13 +18,14 @@ from app.utils.errors import PDFInvalidError, PDFPasswordProtectedError, PDFTooL
 logger = logging.getLogger(__name__)
 
 _PDF_MAGIC = b"%PDF-"
-MAX_PAGES_DEFAULT = 50
 
 
-def validar_pdf_bytes(pdf_bytes: bytes, max_pages: int = MAX_PAGES_DEFAULT) -> int:
+def validar_pdf_bytes(pdf_bytes: bytes, max_pages: int | None = None) -> int:
     """
-    Valida que o buffer é um PDF legível, não criptografado e dentro do
-    limite de páginas. Retorna o número de páginas.
+    Valida que o buffer é um PDF legível e não criptografado. Retorna o
+    número de páginas. O limite de páginas é **opcional** (default sem
+    limite) — cartões de ponto de empresas grandes podem ter centenas
+    de páginas legitimamente.
     """
     if not pdf_bytes:
         raise PDFInvalidError("Arquivo vazio.")
@@ -47,7 +48,7 @@ def validar_pdf_bytes(pdf_bytes: bytes, max_pages: int = MAX_PAGES_DEFAULT) -> i
     num_pages = len(reader.pages)
     if num_pages == 0:
         raise PDFInvalidError("PDF sem páginas.")
-    if num_pages > max_pages:
+    if max_pages is not None and num_pages > max_pages:
         raise PDFTooLargeError(
             f"PDF com {num_pages} páginas excede o limite de {max_pages}."
         )

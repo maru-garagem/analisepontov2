@@ -343,6 +343,13 @@ def cadastro_confirmar(
         }
         proc.tempo_processamento_ms = (proc.tempo_processamento_ms or 0) + resultado.tempo_ms
 
+        # Breakdown do score entra em resultado_json para debug
+        from app.services.conformidade import breakdown_como_dict, calcular_score_detalhado
+        breakdown = calcular_score_detalhado(resultado, esqueleto)
+        resultado_json = dict(proc.resultado_json or {})
+        resultado_json["score_breakdown"] = breakdown_como_dict(breakdown)
+        proc.resultado_json = resultado_json
+
         db.commit()
         atualizar_metricas_esqueleto(db, esqueleto, score)
 

@@ -5,13 +5,14 @@ from types import SimpleNamespace
 from app.services.conformidade import (
     _celula_bem_parseada,
     calcular_score,
+    calcular_score_detalhado,
     classificar_status_por_score,
 )
 from app.services.extracao_esqueleto import ResultadoExtracao
 
 
 def _esqueleto_fake(estrutura: dict) -> SimpleNamespace:
-    return SimpleNamespace(estrutura=estrutura, exemplos_validados=[])
+    return SimpleNamespace(estrutura=estrutura, exemplos_validados=[], id="fake")
 
 
 def _resultado(cabecalho=None, linhas=None, avisos=None):
@@ -25,17 +26,29 @@ def _resultado(cabecalho=None, linhas=None, avisos=None):
 
 
 class TestCelulaBemParseada:
-    def test_hora_valida(self):
+    def test_hora_hh_mm(self):
         assert _celula_bem_parseada("hora", "08:30")
+
+    def test_hora_com_segundos(self):
+        assert _celula_bem_parseada("hora", "08:30:00")
+
+    def test_hora_com_h_separator(self):
+        assert _celula_bem_parseada("hora", "08h30")
+
+    def test_hora_maiuscula_h(self):
+        assert _celula_bem_parseada("hora", "08H30")
 
     def test_hora_invalida(self):
         assert not _celula_bem_parseada("hora", "xyz")
 
-    def test_data_valida_dd_mm_yyyy(self):
+    def test_data_dd_mm_yyyy(self):
         assert _celula_bem_parseada("data", "01/03/2026")
 
-    def test_data_valida_dd_mm(self):
+    def test_data_dd_mm(self):
         assert _celula_bem_parseada("data", "01/03")
+
+    def test_data_com_traco(self):
+        assert _celula_bem_parseada("data", "01-03-2026")
 
     def test_vazio_nao_invalida(self):
         assert _celula_bem_parseada("hora", None)
@@ -46,7 +59,7 @@ class TestCelulaBemParseada:
 
 
 class TestCalcularScore:
-    def test_cabecalho_completo_linhas_com_horas_ok(self):
+    def test_extracao_perfeita_da_1(self):
         esq = _esqueleto_fake({
             "cabecalho": {"empresa": {}, "cnpj": {}, "funcionario": {}},
             "tabela": {
@@ -63,61 +76,99 @@ class TestCalcularScore:
                 {"entrada": "08:15", "saida": "17:30"},
             ],
         )
-        score = calcular_score(res, esq)
-        assert score == 1.0
+        assert calcular_score(res, esq) == 1.0
 
-    def test_cabecalho_parcial_e_celulas_invalidas(self):
+    def test_horas_em_formato_h_nao_penalizam(self):
+        """Formato 08h30 é legítimo e deve passar no validador permissivo."""
         esq = _esqueleto_fake({
-            "cabecalho": {"empresa": {}, "cnpj": {}},
+            "cabecalho": {"empresa": {}},
             "tabela": {"colunas": [{"nome": "entrada", "tipo": "hora"}]},
         })
         res = _resultado(
-            cabecalho={"empresa": "ACME", "cnpj": None},
-            linhas=[
-                {"entrada": "08:00"},   # ok
-                {"entrada": "xxx"},     # inválido
-            ],
+            cabecalho={"empresa": "X"},
+            linhas=[{"entrada": "08h30"}, {"entrada": "17h45"}],
         )
-        score = calcular_score(res, esq)
-        # Cabecalho 1/2 = 0.5, linhas 1.0, celulas_validas 1/2 = 0.5
-        # Score = 0.3*0.5 + 0.3*1.0 + 0.4*0.5 = 0.65
-        assert abs(score - 0.65) < 0.001
+        assert calcular_score(res, esq) == 1.0
 
-    def test_sem_linhas_zera_peso_de_linhas(self):
+    def test_sem_colunas_tipadas_nao_penaliza(self):
+        """
+        Esqueleto cuja tabela é só texto: componente de células vale 1.0.
+        Cabeçalho 100% + linhas presentes → 100% total.
+        """
+        esq = _esqueleto_fake({
+            "cabecalho": {"a": {}},
+            "tabela": {"colunas": [{"nome": "obs", "tipo": "texto"}]},
+        })
+        res = _resultado(
+            cabecalho={"a": "x"},
+            linhas=[{"obs": "normal"}, {"obs": "feriado"}],
+        )
+        assert calcular_score(res, esq) == 1.0
+
+    def test_cabecalho_parcial(self):
         esq = _esqueleto_fake({
             "cabecalho": {"a": {}, "b": {}},
             "tabela": {"colunas": []},
         })
-        res = _resultado(cabecalho={"a": "x", "b": "y"}, linhas=[])
-        # Cabecalho 1.0, linhas 0.0, celulas 1.0 (nenhuma coluna tipada)
-        # Score = 0.3 + 0.0 + 0.4 = 0.7
-        assert abs(calcular_score(res, esq) - 0.7) < 0.001
+        res = _resultado(cabecalho={"a": "x", "b": None}, linhas=[{"z": 1}])
+        # cabecalho 0.5, linhas 1.0, celulas 1.0 (sem tipadas)
+        # 0.30*0.5 + 0.40*1 + 0.30*1 = 0.85
+        score = calcular_score(res, esq)
+        assert abs(score - 0.85) < 0.001
 
-    def test_avisos_penalizam(self):
+    def test_sem_linhas(self):
         esq = _esqueleto_fake({
             "cabecalho": {"a": {}},
             "tabela": {"colunas": []},
         })
-        res_sem = _resultado(cabecalho={"a": "x"}, linhas=[{"x": 1}])
-        res_com = _resultado(
-            cabecalho={"a": "x"},
-            linhas=[{"x": 1}],
-            avisos=["w1", "w2"],
-        )
-        assert calcular_score(res_sem, esq) > calcular_score(res_com, esq)
+        res = _resultado(cabecalho={"a": "x"}, linhas=[])
+        # cab 1.0, linhas 0.0, cel 1.0 → 0.30 + 0 + 0.30 = 0.60
+        assert abs(calcular_score(res, esq) - 0.60) < 0.001
+
+    def test_avisos_penalizam_menos(self):
+        esq = _esqueleto_fake({
+            "cabecalho": {"a": {}},
+            "tabela": {"colunas": []},
+        })
+        res = _resultado(cabecalho={"a": "x"}, linhas=[{"x": 1}], avisos=["a", "b"])
+        # score base 1.0, penalidade 2*0.02 = 0.04 → 0.96
+        assert abs(calcular_score(res, esq) - 0.96) < 0.001
+
+    def test_penalidade_avisos_capped(self):
+        esq = _esqueleto_fake({"cabecalho": {}, "tabela": {"colunas": []}})
+        res = _resultado(linhas=[{"x": 1}], avisos=["w"] * 20)
+        # penalidade capada em 0.10
+        # cab 1 (0 campos → max(1,0)=1, preenchidos 0, mas 0/1 = 0; 0.30*0=0)
+        # Espera, cabecalho vazio = 0 campos, preenchidos 0/max(1,0)=0/1=0.0
+        # linhas 1.0, cel 1.0
+        # 0.40 + 0.30*0 + 0.30 - 0.10 = 0.60
+        assert abs(calcular_score(res, esq) - 0.60) < 0.001
 
     def test_score_limitado_entre_0_e_1(self):
-        esq = _esqueleto_fake({
-            "cabecalho": {"a": {}},
-            "tabela": {"colunas": []},
-        })
-        res = _resultado(
-            cabecalho={"a": None},
-            linhas=[],
-            avisos=["w"] * 10,  # penalidade máxima 0.2
-        )
+        esq = _esqueleto_fake({"cabecalho": {"a": {}}, "tabela": {"colunas": []}})
+        res = _resultado(cabecalho={"a": None}, linhas=[], avisos=["w"] * 50)
         score = calcular_score(res, esq)
         assert 0.0 <= score <= 1.0
+
+
+class TestBreakdown:
+    def test_retorna_componentes(self):
+        esq = _esqueleto_fake({
+            "cabecalho": {"a": {}, "b": {}},
+            "tabela": {"colunas": [{"nome": "h", "tipo": "hora"}]},
+        })
+        res = _resultado(
+            cabecalho={"a": "x", "b": None},
+            linhas=[{"h": "08:00"}],
+            avisos=["w"],
+        )
+        b = calcular_score_detalhado(res, esq)
+        assert b.frac_cabecalho == 0.5
+        assert b.tem_linhas == 1.0
+        assert b.frac_celulas == 1.0
+        assert b.tem_colunas_tipadas is True
+        assert b.num_avisos == 1
+        assert b.penalidade_avisos == 0.02
 
 
 class TestClassificarStatus:

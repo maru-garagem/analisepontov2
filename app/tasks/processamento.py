@@ -176,7 +176,11 @@ def _executar_pipeline(db: Session, processamento_id: uuid.UUID, inicio: float) 
 
 
 def _fluxo_rapido(db: Session, processamento_id, pdf_bytes, ident, inicio) -> None:
-    from app.services.conformidade import calcular_score  # import lazy (Fase 9)
+    from app.services.conformidade import (
+        atualizar_metricas_esqueleto,
+        breakdown_como_dict,
+        calcular_score_detalhado,
+    )
 
     try:
         resultado = aplicar_esqueleto(pdf_bytes, ident.esqueleto)
@@ -191,13 +195,12 @@ def _fluxo_rapido(db: Session, processamento_id, pdf_bytes, ident, inicio) -> No
         storage.remove_pdf(str(processamento_id))
         return
 
-    score = calcular_score(resultado, ident.esqueleto)
+    breakdown = calcular_score_detalhado(resultado, ident.esqueleto)
+    score = breakdown.score_final
     from app.config import get_settings
     settings = get_settings()
     if score >= settings.SCORE_CONFORMIDADE_MIN:
         status_final = StatusProcessamento.SUCESSO.value
-    elif score >= settings.SCORE_CONFORMIDADE_ALERTA:
-        status_final = StatusProcessamento.SUCESSO_COM_AVISO.value
     else:
         status_final = StatusProcessamento.SUCESSO_COM_AVISO.value
 
@@ -214,14 +217,12 @@ def _fluxo_rapido(db: Session, processamento_id, pdf_bytes, ident, inicio) -> No
             "empresa_nome": ident.empresa.nome if ident.empresa else None,
             "cnpj_detectado": formatar_cnpj(ident.cnpj_detectado) if ident.cnpj_detectado else None,
             "fingerprint": ident.fingerprint.hash,
+            "score_breakdown": breakdown_como_dict(breakdown),
         },
         tempo_processamento_ms=int((time.monotonic() - inicio) * 1000),
     )
 
-    # Atualiza métricas do esqueleto (Fase 9 refina isso)
-    from app.services.conformidade import atualizar_metricas_esqueleto
     atualizar_metricas_esqueleto(db, ident.esqueleto, score)
-
     storage.remove_pdf(str(processamento_id))
 
 
