@@ -329,13 +329,30 @@ def cadastro_confirmar(
         if versao_anterior and versao_anterior.status == StatusEsqueleto.ATIVO.value:
             versao_anterior.status = StatusEsqueleto.INATIVO.value
 
+        # Normaliza exemplos_validados: se o frontend mandou com trecho_pdf
+        # vazio, preenche com um snippet do texto real do PDF. Few-shot só
+        # ajuda a IA barata se a dupla (trecho, saida) estiver completa.
+        exemplos_normalizados: list[dict] = []
+        try:
+            from app.utils.pdf import extrair_texto_todo
+            textos_pdf = extrair_texto_todo(pdf_bytes)
+            trecho_default = (textos_pdf[0] if textos_pdf else "")[:2000]
+        except Exception:
+            trecho_default = ""
+
+        for ex in (payload.exemplos_validados or []):
+            ex_copy = dict(ex)
+            if not ex_copy.get("trecho_pdf") and trecho_default:
+                ex_copy["trecho_pdf"] = trecho_default
+            exemplos_normalizados.append(ex_copy)
+
         esqueleto = Esqueleto(
             empresa_id=empresa.id,
             versao=proxima_versao,
             status=StatusEsqueleto.ATIVO.value,
             fingerprint=proposta_payload["fingerprint_hash"],
             estrutura=payload.estrutura,
-            exemplos_validados=payload.exemplos_validados,
+            exemplos_validados=exemplos_normalizados,
             criado_por=session_id_short(auth),
         )
         db.add(esqueleto)

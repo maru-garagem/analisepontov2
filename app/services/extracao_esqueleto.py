@@ -13,6 +13,7 @@ Saída: ResultadoExtracao (cabeçalho, linhas, método efetivo, tempo, avisos).
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -259,6 +260,133 @@ def _ocr_guiado(
     return {"cabecalho": cabecalho, "linhas": linhas}
 
 
+def _monta_prompt_ia(
+    estrutura: dict[str, Any],
+    exemplos: list[dict[str, Any]],
+    texto_pdf: str,
+) -> tuple[str, str]:
+    """
+    Prompt estruturado: lista EXPLICITAMENTE os campos do cabeçalho e as
+    colunas esperadas para a IA não inventar chaves. Exemplos são incluídos
+    apenas se tiverem trecho_pdf + saida_esperada preenchidos (few-shot só
+    útil quando tem o par completo).
+    """
+    cabecalho_spec = estrutura.get("cabecalho") or {}
+    campos_cabecalho = list(cabecalho_spec.keys())
+
+    tabela_spec = estrutura.get("tabela") or {}
+    colunas = tabela_spec.get("colunas") or []
+    linhas_desc = []
+    for c in colunas:
+        nome = c.get("nome")
+        tipo = c.get("tipo", "texto")
+        if nome:
+            linhas_desc.append(f"  - {nome} ({tipo})")
+
+    parsing = estrutura.get("parsing") or {}
+    formato_hora = parsing.get("formato_hora", "HH:MM")
+    formato_data = parsing.get("formato_data", "DD/MM/YYYY")
+    ano_default = parsing.get("ano_default")
+    celula_vazia = parsing.get("celula_vazia_valor")
+
+    exemplos_uteis = [
+        e for e in (exemplos or [])[:3]
+        if e.get("trecho_pdf") and e.get("saida_esperada")
+    ]
+
+    blocos: list[str] = [
+        "Extraia os dados de um cartão de ponto trabalhista brasileiro.",
+        "",
+        "CAMPOS DO CABEÇALHO (use EXATAMENTE estas chaves):",
+    ]
+    if campos_cabecalho:
+        blocos.extend(f"  - {k}" for k in campos_cabecalho)
+    else:
+        blocos.append("  (não especificado — extraia empresa, funcionário, período se achar)")
+
+    blocos.append("")
+    blocos.append("COLUNAS DA TABELA DE BATIDAS (cada linha é um objeto com EXATAMENTE estas chaves):")
+    if linhas_desc:
+        blocos.extend(linhas_desc)
+    else:
+        blocos.append("  (não especificado — identifique as colunas pelo cabeçalho da tabela)")
+
+    blocos.append("")
+    blocos.append("REGRAS DE FORMATAÇÃO:")
+    blocos.append(f"  - Horas: formato {formato_hora} (24h)")
+    blocos.append(
+        f"  - Datas: formato {formato_data}"
+        + (f" (use ano {ano_default} se a data no PDF omitir o ano)" if ano_default else "")
+    )
+    blocos.append(f"  - Células vazias devem ser: {json.dumps(celula_vazia)}")
+    blocos.append("  - NÃO invente valores. Se não achar, deixe como vazio.")
+
+    if exemplos_uteis:
+        blocos.append("")
+        blocos.append("EXEMPLOS JÁ VALIDADOS POR HUMANO (siga este mesmo formato):")
+        for i, ex in enumerate(exemplos_uteis):
+            blocos.append(f"\n--- Exemplo {i + 1} ---")
+            blocos.append("Trecho do PDF:")
+            blocos.append(str(ex.get("trecho_pdf", ""))[:1500])
+            blocos.append("Saída esperada:")
+            blocos.append(
+                json.dumps(ex.get("saida_esperada") or {}, ensure_ascii=False, indent=2)
+            )
+
+    blocos.append("")
+    blocos.append("TEXTO DO PDF A EXTRAIR:")
+    blocos.append("```")
+    blocos.append(texto_pdf[:20000])
+    blocos.append("```")
+    blocos.append("")
+    blocos.append("Retorne APENAS JSON válido neste formato (sem texto fora do JSON):")
+    blocos.append('{"cabecalho": {<chaves listadas acima>}, "linhas": [{<chaves listadas acima>}, ...]}')
+
+    user = "\n".join(blocos)
+    system = (
+        "Você é um extrator estrito de dados. Responde APENAS com um JSON válido, "
+        "sem markdown, sem comentários, sem texto antes ou depois."
+    )
+    return system, user
+
+
+def _normaliza_linhas_ia(
+    linhas_raw: Any,
+    colunas: list[dict[str, Any]],
+    parsing: dict[str, Any],
+    avisos: list[str],
+) -> list[dict[str, Any]]:
+    """
+    Valida o retorno da IA: deve ser lista de dicts. Filtra tipos fora disso,
+    restringe às chaves declaradas no esqueleto (se houver) e aplica parsing
+    (hora/data/número) — mesma normalização do plumber_direto, garantindo
+    consistência independente de quem extraiu.
+    """
+    if not isinstance(linhas_raw, list):
+        avisos.append("llm_linhas_nao_e_lista")
+        return []
+
+    nomes_colunas = [c.get("nome") for c in colunas if c.get("nome")]
+    tipos = {c["nome"]: c.get("tipo", "texto") for c in colunas if c.get("nome")}
+
+    linhas: list[dict[str, Any]] = []
+    for item in linhas_raw:
+        if not isinstance(item, dict):
+            continue
+        if nomes_colunas:
+            # Filtra apenas chaves declaradas + aplica parsing.
+            linha: dict[str, Any] = {}
+            for nome in nomes_colunas:
+                linha[nome] = parse_celula(tipos[nome], item.get(nome), parsing)
+            # Descarta linhas totalmente vazias (IA às vezes emite placeholders)
+            if any(v not in (None, "", parsing.get("celula_vazia_valor")) for v in linha.values()):
+                linhas.append(linha)
+        else:
+            # Sem colunas declaradas, aceita o dict como veio.
+            linhas.append(item)
+    return linhas
+
+
 def _ia_barata_com_exemplos(
     pdf_bytes: bytes,
     estrutura: dict[str, Any],
@@ -267,24 +395,26 @@ def _ia_barata_com_exemplos(
     texto_override: str | None = None,
 ) -> dict[str, Any]:
     """
-    Fallback usando LLM barato com few-shot dos exemplos validados.
-    Envia apenas texto (não imagem) para ser econômico. Se o PDF não tiver
-    texto digital, `texto_override` pode ser passado (p.ex. resultado do OCR).
+    Fallback usando LLM barato. Funciona **com ou sem** exemplos validados —
+    se não houver exemplos, usa só a estrutura declarada como guia.
 
-    O modelo usado é `estrutura.modelo_fallback` se definido, senão o default
-    das settings (OPENROUTER_MODEL_BARATO).
+    Modelo usado: `estrutura.modelo_fallback` (se na whitelist), senão o
+    default das settings.
     """
-    if texto_override is not None:
+    # 1. Obtém texto — override > pdfplumber > OCR.
+    if texto_override is not None and texto_override.strip():
         texto_pdf = texto_override.strip()
     else:
-        textos = extrair_texto_todo(pdf_bytes)
-        texto_pdf = "\n".join(textos).strip()
+        try:
+            textos = extrair_texto_todo(pdf_bytes)
+            texto_pdf = "\n".join(textos).strip()
+        except Exception:
+            texto_pdf = ""
 
     if not texto_pdf:
-        # Tenta OCR como último recurso pra ter texto.
         try:
-            textos_ocr = ocr_todo(pdf_bytes)
-            texto_pdf = "\n".join(textos_ocr).strip()
+            texto_pdf = "\n".join(ocr_todo(pdf_bytes)).strip()
+            avisos.append("ia_texto_via_ocr")
         except Exception:
             texto_pdf = ""
 
@@ -294,30 +424,22 @@ def _ia_barata_com_exemplos(
             "PDF sem texto extraível nem por pdfplumber nem por OCR."
         )
 
+    # 2. Monta prompt estruturado.
+    system, user = _monta_prompt_ia(estrutura, exemplos, texto_pdf)
+
+    # 3. Modelo efetivo.
     settings = get_settings()
     modelo_custom = estrutura.get("modelo_fallback")
     if modelo_custom and modelo_custom in settings.modelos_baratos_permitidos:
         modelo_efetivo = modelo_custom
     else:
         modelo_efetivo = settings.OPENROUTER_MODEL_BARATO
+    logger.info("ia_barata chamando modelo=%s exemplos_uteis=%d texto_len=%d",
+                modelo_efetivo,
+                sum(1 for e in (exemplos or []) if e.get("trecho_pdf") and e.get("saida_esperada")),
+                len(texto_pdf))
 
-    exemplos_txt = "\n\n".join(
-        f"### Exemplo {i+1}\nTrecho:\n{e.get('trecho_pdf','')}\n\nSaída:\n{e.get('saida_esperada')}"
-        for i, e in enumerate(exemplos[:3])  # máx 3 exemplos few-shot
-    )
-
-    system = (
-        "Você é um extrator de cartões de ponto brasileiros. "
-        "Siga EXATAMENTE o mesmo formato JSON dos exemplos. "
-        "Retorne apenas o JSON, sem comentários."
-    )
-    user = (
-        f"Estrutura esperada:\n{estrutura}\n\n"
-        f"Exemplos validados:\n{exemplos_txt}\n\n"
-        f"Texto do PDF a extrair:\n{texto_pdf[:15000]}\n\n"
-        f"Retorne JSON com chaves 'cabecalho' (dict) e 'linhas' (lista de dicts)."
-    )
-
+    # 4. Chama.
     client = get_llm_client()
     try:
         resultado = client.chat_json(
@@ -326,19 +448,77 @@ def _ia_barata_com_exemplos(
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_tokens=4000,
+            max_tokens=6000,
         )
     except LLMUnavailableError as exc:
         avisos.append(f"llm_indisponivel: {exc}")
         raise
 
-    cabecalho = resultado.get("cabecalho") or {}
-    linhas = resultado.get("linhas") or []
-    if not isinstance(linhas, list):
-        avisos.append("llm_linhas_invalidas")
-        linhas = []
+    # 5. Valida retorno.
+    cabecalho = resultado.get("cabecalho")
+    if not isinstance(cabecalho, dict):
+        avisos.append("llm_cabecalho_invalido")
+        cabecalho = {}
+
+    tabela_spec = estrutura.get("tabela") or {}
+    colunas = tabela_spec.get("colunas") or []
+    parsing = estrutura.get("parsing") or {}
+    linhas = _normaliza_linhas_ia(resultado.get("linhas"), colunas, parsing, avisos)
 
     return {"cabecalho": cabecalho, "linhas": linhas}
+
+
+# --- Heurística de fallback -------------------------------------------
+
+def _diagnostica_extracao(
+    dados: dict[str, Any], estrutura: dict[str, Any]
+) -> str | None:
+    """
+    Retorna None se a extração parece OK, ou um string com o motivo
+    se há sinais de que precisa de IA para completar/refazer.
+
+    Critérios (ordenados do mais forte ao mais fraco):
+      1. Zero linhas extraídas.
+      2. Tabela tem colunas tipadas hora/data declaradas, mas NENHUMA
+         célula dessas colunas está preenchida em nenhuma linha → plumber
+         provavelmente quebrou a tabela.
+      3. Mais de 70% das linhas têm apenas 1 célula populada (ruído).
+    """
+    linhas = dados.get("linhas") or []
+    if not linhas:
+        return "zero_linhas"
+
+    tabela = estrutura.get("tabela") or {}
+    colunas = tabela.get("colunas") or []
+    parsing = estrutura.get("parsing") or {}
+    valor_vazio = parsing.get("celula_vazia_valor")
+
+    cols_tipadas = [c for c in colunas if c.get("tipo") in ("hora", "data")]
+    if cols_tipadas:
+        total_celulas_tipadas_preenchidas = 0
+        for linha in linhas:
+            for c in cols_tipadas:
+                nome = c.get("nome")
+                if not nome:
+                    continue
+                valor = linha.get(nome)
+                if valor not in (None, "", valor_vazio):
+                    total_celulas_tipadas_preenchidas += 1
+        if total_celulas_tipadas_preenchidas == 0:
+            return "colunas_tipadas_todas_vazias"
+
+    # Linhas-ruído: muitas linhas com só 1 célula significativa
+    if colunas:
+        def _celulas_preenchidas(linha):
+            return sum(
+                1 for v in linha.values()
+                if v not in (None, "", valor_vazio)
+            )
+        ruidosas = sum(1 for l in linhas if _celulas_preenchidas(l) <= 1)
+        if ruidosas / len(linhas) > 0.7 and len(linhas) >= 3:
+            return "maioria_linhas_com_1_celula"
+
+    return None
 
 
 # --- Entry point -------------------------------------------------------
@@ -352,12 +532,13 @@ def aplicar_esqueleto(
 ) -> ResultadoExtracao:
     """
     Aplica o esqueleto em cascata:
-      1. Método preferencial do esqueleto (plumber_direto / ocr_guiado /
-         ia_barata_com_exemplos).
-      2. Se retornou 0 linhas e o PDF parece escaneado → OCR guiado.
-      3. Se ainda 0 linhas e há exemplos_validados → IA barata.
+      1. Método preferencial declarado no esqueleto.
+      2. Se extração parece ruim E PDF escaneado → OCR guiado.
+      3. Se extração AINDA parece ruim → IA barata (com ou sem exemplos).
 
-    Flags permitem desligar cada fallback individualmente (testes).
+    "Parece ruim" = 0 linhas, OU colunas hora/data todas vazias, OU maioria
+    das linhas é ruído (ver _diagnostica_extracao). Antes, só 0 linhas
+    disparava fallback; isso permitia passar por extrações parciais quebradas.
     """
     inicio = time.monotonic()
     avisos: list[str] = []
@@ -386,38 +567,71 @@ def aplicar_esqueleto(
     else:
         raise PontoExtractError(f"Método '{metodo_preferencial}' não suportado.")
 
-    # --- Cascata 1: plumber sem linhas e PDF escaneado → OCR ---
+    # --- Cascata 1: plumber ruim E PDF escaneado → OCR ---
+    diagnostico = _diagnostica_extracao(dados, estrutura)
     if (
         permitir_fallback_ocr
-        and not dados.get("linhas")
+        and diagnostico
         and metodo_efetivo == MetodoExtracao.ESQUELETO_PLUMBER.value
         and parece_pdf_escaneado(pdf_bytes)
     ):
-        logger.info("fallback_ocr_guiado esqueleto_id=%s", esqueleto.id)
-        avisos.append("plumber_vazio_tentando_ocr")
-        dados = _ocr_guiado(pdf_bytes, estrutura, avisos)
+        logger.info(
+            "fallback_ocr_guiado esqueleto_id=%s motivo=%s",
+            esqueleto.id, diagnostico,
+        )
+        avisos.append(f"plumber_{diagnostico}_tentando_ocr")
+        cabecalho_anterior = dados.get("cabecalho", {})
+        dados_novo = _ocr_guiado(pdf_bytes, estrutura, avisos)
+        # Preserva cabeçalho se o novo vier pior
+        cab_novo = dados_novo.get("cabecalho") or {}
+        if not any(cab_novo.values()):
+            dados_novo["cabecalho"] = cabecalho_anterior
+        dados = dados_novo
         metodo_efetivo = MetodoExtracao.ESQUELETO_OCR.value
+        diagnostico = _diagnostica_extracao(dados, estrutura)
 
-    # --- Cascata 2: se ainda vazio e há exemplos → IA barata ---
+    # --- Cascata 2: extração ainda parece ruim → IA barata ---
+    # (Não exige exemplos_validados — IA barata funciona também só com a estrutura.)
     if (
         permitir_fallback_llm
-        and not dados.get("linhas")
+        and diagnostico
         and metodo_efetivo != MetodoExtracao.ESQUELETO_IA_BARATA.value
-        and exemplos
     ):
-        logger.info("fallback_ia_barata esqueleto_id=%s", esqueleto.id)
-        avisos.append(f"{metodo_efetivo}_vazio_tentando_ia_barata")
+        logger.info(
+            "fallback_ia_barata esqueleto_id=%s motivo=%s vindo_de=%s",
+            esqueleto.id, diagnostico, metodo_efetivo,
+        )
+        avisos.append(f"{metodo_efetivo}_{diagnostico}_tentando_ia_barata")
         # Se já OCRizamos, reusa o texto pra evitar OCR duplicado.
-        texto_override = None
+        texto_override: str | None = None
         if metodo_efetivo == MetodoExtracao.ESQUELETO_OCR.value:
             try:
                 texto_override = "\n".join(ocr_todo(pdf_bytes))
             except Exception:
                 texto_override = None
-        dados = _ia_barata_com_exemplos(
-            pdf_bytes, estrutura, exemplos, avisos, texto_override=texto_override
-        )
-        metodo_efetivo = MetodoExtracao.ESQUELETO_IA_BARATA.value
+
+        cabecalho_anterior = dados.get("cabecalho", {})
+        try:
+            dados_ia = _ia_barata_com_exemplos(
+                pdf_bytes, estrutura, exemplos, avisos, texto_override=texto_override
+            )
+            # Preserva cabeçalho anterior se a IA não trouxer nada melhor.
+            cab_ia = dados_ia.get("cabecalho") or {}
+            if not any(cab_ia.values()) and any(cabecalho_anterior.values()):
+                dados_ia["cabecalho"] = cabecalho_anterior
+            # Se a IA retornou mais linhas que o método anterior, usa a IA;
+            # se vier pior que o anterior, mantém o anterior (evita regredir).
+            linhas_ia = dados_ia.get("linhas") or []
+            linhas_ant = dados.get("linhas") or []
+            if len(linhas_ia) > len(linhas_ant):
+                dados = dados_ia
+                metodo_efetivo = MetodoExtracao.ESQUELETO_IA_BARATA.value
+            else:
+                avisos.append(
+                    f"ia_barata_trouxe_{len(linhas_ia)}_linhas_menos_que_anterior_{len(linhas_ant)}"
+                )
+        except PontoExtractError as exc:
+            avisos.append(f"ia_barata_falhou: {exc}")
 
     tempo_ms = int((time.monotonic() - inicio) * 1000)
     return ResultadoExtracao(
