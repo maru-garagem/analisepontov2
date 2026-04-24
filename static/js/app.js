@@ -1,6 +1,15 @@
-// Dashboard: upload múltiplo + fila de cards com polling independente.
-// Cada arquivo vira um card na fila com status próprio. Processamentos
-// continuam em background no servidor mesmo se a aba for fechada.
+// Dashboard: upload (1 ou múltiplo) + fila de cards com polling independente.
+//
+// Regra da UX:
+//  - Upload de 1 PDF apenas: se cair em cadastro assistido, redirect direto
+//    para a tela de cadastro (comportamento tradicional, não perde o fluxo
+//    de alteração/validação).
+//  - Upload múltiplo: cada arquivo vira card na fila; cadastros pendentes
+//    ficam destacados com botão "Cadastrar →" e o usuário decide por qual
+//    começar.
+//
+// A fila é persistida em sessionStorage para sobreviver a F5 ou ao retorno
+// da tela de cadastro assistido (que faz location.href = '/').
 
 (async function () {
   if (!(await App.ensureAuthed())) return;
@@ -11,7 +20,7 @@
     App.logout();
   });
 
-  // Mostra último resultado se voltamos do cadastro
+  // Mostra último resultado se voltamos do cadastro assistido
   const ultimoRaw = sessionStorage.getItem('ultimo_resultado');
   if (ultimoRaw) {
     sessionStorage.removeItem('ultimo_resultado');
@@ -31,9 +40,7 @@
       opt.textContent = m + (m === data.padrao ? '  (padrão)' : '');
       modeloSelect.appendChild(opt);
     }
-  } catch {
-    // falha silenciosa — fica só com "Padrão do servidor"
-  }
+  } catch {}
 
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
@@ -51,30 +58,137 @@
   dropZone.addEventListener('drop', (e) => {
     e.preventDefault();
     dropZone.classList.remove('bg-blue-50', 'border-blue-500');
-    for (const f of e.dataTransfer.files) handleFile(f);
+    receberArquivos([...e.dataTransfer.files]);
   });
   fileInput.addEventListener('change', () => {
-    for (const f of fileInput.files) handleFile(f);
-    fileInput.value = ''; // permite reenviar o mesmo arquivo depois
+    receberArquivos([...fileInput.files]);
+    fileInput.value = '';
   });
+
+  function receberArquivos(arquivos) {
+    const pdfs = arquivos.filter((f) => f.name.toLowerCase().endsWith('.pdf'));
+    const rejeitados = arquivos.length - pdfs.length;
+    if (rejeitados > 0) {
+      App.toast(`${rejeitados} arquivo(s) não-PDF ignorados.`, 'warn');
+    }
+    if (pdfs.length === 0) return;
+
+    // Se o usuário enviou exatamente 1 PDF e ele cair em cadastro,
+    // redireciona automaticamente para a tela de cadastro assistido.
+    const abrirCadastroSePrecisar = pdfs.length === 1;
+    for (const f of pdfs) handleFile(f, abrirCadastroSePrecisar);
+  }
 
   document.getElementById('limparFila').addEventListener('click', () => {
     for (const li of [...fila.children]) {
-      if (li.dataset.status && li.dataset.status !== 'enviando' && li.dataset.status !== 'processando') {
+      if (
+        li.dataset.status &&
+        li.dataset.status !== 'enviando' &&
+        li.dataset.status !== 'processando'
+      ) {
         li.remove();
+        removerDoSession(li.dataset.processingId);
       }
     }
     if (fila.children.length === 0) filaCard.classList.add('hidden');
   });
 
-  async function handleFile(file) {
-    if (!file.name.toLowerCase().endsWith('.pdf')) {
-      App.toast(`"${file.name}" não é um PDF.`, 'error');
-      return;
+  // --- Persistência em sessionStorage ------------------------------------
+
+  const SS_KEY = 'fila_processamentos';
+
+  function lerSession() {
+    try {
+      return JSON.parse(sessionStorage.getItem(SS_KEY) || '[]');
+    } catch {
+      return [];
     }
+  }
+  function salvarSession(arr) {
+    sessionStorage.setItem(SS_KEY, JSON.stringify(arr));
+  }
+  function adicionarNoSession(item) {
+    const arr = lerSession().filter((i) => i.processing_id !== item.processing_id);
+    arr.push(item);
+    salvarSession(arr);
+  }
+  function removerDoSession(pid) {
+    if (!pid) return;
+    salvarSession(lerSession().filter((i) => i.processing_id !== pid));
+  }
+
+  // Restaura fila ao abrir o dashboard (F5, volta de cadastro, etc.)
+  const pendentes = lerSession();
+  if (pendentes.length > 0) {
+    filaCard.classList.remove('hidden');
+    for (const p of pendentes) restaurarCard(p);
+  }
+
+  async function restaurarCard({ processing_id, nome }) {
+    const card = criarCard(nome || '(arquivo)');
+    card.dataset.processingId = processing_id;
+    fila.prepend(card);
+    atualizarCard(card, { status: 'processando', msg: 'Verificando status...', processingId: processing_id });
+    try {
+      const status = await App.apiJson(`/api/extract/${processing_id}/status`);
+      if (status.status === 'em_processamento') {
+        continuarPolling(card, processing_id);
+      } else {
+        refletirStatusFinal(card, status);
+      }
+    } catch (err) {
+      atualizarCard(card, { status: 'falhou', msg: 'Consulta falhou: ' + err.message, processingId: processing_id });
+    }
+  }
+
+  async function continuarPolling(card, processing_id) {
+    try {
+      const final = await App.poll(
+        () => `/api/extract/${processing_id}/status`,
+        { intervalMs: 1500, maxMs: 600000, shouldStop: (d) => d.status !== 'em_processamento' }
+      );
+      refletirStatusFinal(card, final);
+    } catch (err) {
+      atualizarCard(card, { status: 'falhou', msg: err.message, processingId: processing_id });
+    }
+  }
+
+  function refletirStatusFinal(card, final) {
+    const pid = card.dataset.processingId;
+    if (final.status === 'aguardando_cadastro') {
+      atualizarCard(card, {
+        status: 'aguardando_cadastro',
+        msg: 'Empresa nova — cadastro assistido pronto.',
+        processingId: pid,
+      });
+    } else if (final.status === 'nao_cartao_ponto') {
+      atualizarCard(card, { status: 'nao_cartao_ponto', msg: 'Não é cartão de ponto.', processingId: pid });
+      removerDoSession(pid);
+    } else if (final.status === 'falhou') {
+      atualizarCard(card, { status: 'falhou', msg: final.detalhe_erro || 'erro desconhecido', processingId: pid });
+      removerDoSession(pid);
+    } else {
+      atualizarCard(card, {
+        status: final.status,
+        msg: `${final.empresa_nome || 'Empresa'} — ${
+          typeof final.score_conformidade === 'number'
+            ? Math.round(final.score_conformidade * 100) + '%'
+            : '—'
+        }`,
+        processingId: pid,
+        dadosResultado: final,
+      });
+      removerDoSession(pid);
+    }
+  }
+
+  // --- Upload de um arquivo ---------------------------------------------
+
+  async function handleFile(file, abrirCadastroSePrecisar) {
     filaCard.classList.remove('hidden');
     const card = criarCard(file.name);
     fila.prepend(card);
+    atualizarCard(card, { status: 'enviando', msg: 'Enviando...' });
 
     const fd = new FormData();
     fd.append('file', file);
@@ -83,13 +197,14 @@
 
     let start;
     try {
-      atualizarCard(card, { status: 'enviando', msg: 'Enviando...' });
       start = await App.apiJson('/api/extract', { method: 'POST', body: fd });
     } catch (err) {
       atualizarCard(card, { status: 'falhou', msg: err.message });
       return;
     }
 
+    card.dataset.processingId = start.processing_id;
+    adicionarNoSession({ processing_id: start.processing_id, nome: file.name });
     atualizarCard(card, {
       status: 'processando',
       msg: 'Processando no servidor...',
@@ -100,60 +215,28 @@
     try {
       final = await App.poll(
         () => `/api/extract/${start.processing_id}/status`,
-        {
-          intervalMs: 1500,
-          maxMs: 600000,
-          shouldStop: (d) => d.status !== 'em_processamento',
-        }
+        { intervalMs: 1500, maxMs: 600000, shouldStop: (d) => d.status !== 'em_processamento' }
       );
     } catch (err) {
       atualizarCard(card, { status: 'falhou', msg: err.message, processingId: start.processing_id });
       return;
     }
 
-    if (final.status === 'aguardando_cadastro') {
-      atualizarCard(card, {
-        status: 'aguardando_cadastro',
-        msg: 'Empresa nova — cadastro assistido pronto.',
-        processingId: start.processing_id,
-      });
+    if (final.status === 'aguardando_cadastro' && abrirCadastroSePrecisar) {
+      // 1 único PDF e cai em cadastro → abre a tela direto.
+      App.toast('Empresa nova: indo para cadastro assistido...', 'info');
+      location.href = `/cadastro-assistido.html?id=${start.processing_id}`;
       return;
     }
 
-    if (final.status === 'nao_cartao_ponto') {
-      atualizarCard(card, {
-        status: 'nao_cartao_ponto',
-        msg: 'Não é cartão de ponto.',
-        processingId: start.processing_id,
-      });
-      return;
-    }
-
-    if (final.status === 'falhou') {
-      atualizarCard(card, {
-        status: 'falhou',
-        msg: final.detalhe_erro || 'erro desconhecido',
-        processingId: start.processing_id,
-      });
-      return;
-    }
-
-    // sucesso / sucesso_com_aviso
-    atualizarCard(card, {
-      status: final.status,
-      msg: `${final.empresa_nome || 'Empresa'} — ${
-        typeof final.score_conformidade === 'number'
-          ? Math.round(final.score_conformidade * 100) + '%'
-          : '—'
-      }`,
-      processingId: start.processing_id,
-      dadosResultado: final,
-    });
+    refletirStatusFinal(card, final);
   }
+
+  // --- Renderização dos cards -------------------------------------------
 
   function criarCard(nome) {
     const li = document.createElement('li');
-    li.className = 'border border-slate-200 rounded p-3 flex items-center justify-between gap-4 text-sm';
+    li.className = 'border border-slate-200 rounded p-3 flex items-center justify-between gap-4 text-sm transition';
     li.innerHTML = `
       <div class="flex items-center gap-3 min-w-0">
         <span class="card-icon"></span>
@@ -171,20 +254,23 @@
     card.dataset.status = status;
     if (processingId) card.dataset.processingId = processingId;
 
-    const icon = card.querySelector('.card-icon');
-    const msgEl = card.querySelector('.card-msg');
-    const acoes = card.querySelector('.card-acoes');
+    // destaque visual para quando exige ação do usuário
+    card.classList.remove('border-blue-400', 'bg-blue-50');
+    if (status === 'aguardando_cadastro') {
+      card.classList.add('border-blue-400', 'bg-blue-50');
+    }
 
-    icon.innerHTML = iconePorStatus(status);
-    msgEl.textContent = msg || '';
+    card.querySelector('.card-icon').innerHTML = iconePorStatus(status);
+    card.querySelector('.card-msg').textContent = msg || '';
+
+    const acoes = card.querySelector('.card-acoes');
     acoes.innerHTML = '';
 
     if (status === 'aguardando_cadastro' && processingId) {
       const a = document.createElement('a');
       a.href = `/cadastro-assistido.html?id=${processingId}`;
-      a.className = 'px-3 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700';
-      a.textContent = 'Cadastrar →';
-      // feedback imediato ao clicar
+      a.className = 'px-3 py-1 rounded bg-blue-600 text-white text-xs hover:bg-blue-700 font-medium';
+      a.innerHTML = 'Cadastrar →';
       a.addEventListener('click', () => {
         a.textContent = 'Abrindo...';
         a.classList.add('opacity-75', 'pointer-events-none');
@@ -226,6 +312,8 @@
     }[status] || '•';
     return `<span class="text-lg ${cores[status] || 'text-slate-400'}">${glifo}</span>`;
   }
+
+  // --- Resultado renderizado --------------------------------------------
 
   function renderResult(data) {
     const resultCard = document.getElementById('resultCard');
