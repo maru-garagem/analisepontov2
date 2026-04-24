@@ -21,10 +21,8 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
-RUN chmod +x /app/entrypoint.sh
-
 EXPOSE 8000
 
-# entrypoint.sh loga cada passo (migration, import, uvicorn) para facilitar
-# diagnosticar crashes silenciosos no container.
-CMD ["/app/entrypoint.sh"]
+# entrypoint.py: Python garante stdout flush confiável (shell dash buffera).
+# Loga cada passo (alembic, import de main, uvicorn) para diagnóstico claro.
+CMD ["python", "-u", "entrypoint.py"]
