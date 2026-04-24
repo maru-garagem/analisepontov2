@@ -7,13 +7,9 @@
   const list = document.getElementById('empresasList');
   try {
     const data = await App.apiJson('/api/empresas');
-    renderEmpresas(data);
+    renderEmpresas(data.itens || []);
   } catch (err) {
-    if (err.status === 404) {
-      list.textContent = 'Endpoint ainda não implementado.';
-    } else {
-      list.textContent = 'Erro: ' + err.message;
-    }
+    list.textContent = 'Erro: ' + err.message;
   }
 
   function renderEmpresas(data) {

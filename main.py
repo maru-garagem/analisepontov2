@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
-from app.routes import auth, extract, health
+from app.routes import auth, empresas, esqueletos, extract, health, history
 from app.utils.security import SESSION_COOKIE_NAME, verify_session_token
 
 settings = get_settings()
@@ -71,6 +71,9 @@ async def auth_gate(request: Request, call_next):
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(extract.router, prefix="/api")
+app.include_router(empresas.router, prefix="/api")
+app.include_router(esqueletos.router, prefix="/api")
+app.include_router(history.router, prefix="/api")
 
 # Static files (frontend): servidos a partir de ./static. O HTML é público;
 # as APIs /api/* é que são protegidas pelo middleware acima.
