@@ -1,132 +1,521 @@
 # Decisões técnicas — PontoExtract v2
 
-Documenta o **porquê** de escolhas não óbvias. Atualizado a cada fase.
+Documenta o **porquê** das escolhas — o que foi decidido, o contexto, quais alternativas foram consideradas e os trade-offs aceitos. Organizado por tema, não por ordem cronológica.
+
+Se você só quer saber **como** o código funciona, veja o [`README.md`](./README.md). Se vai **contribuir**, veja o [`CONTRIBUTING.md`](./CONTRIBUTING.md). Este documento é pra quando você se pergunta **"por que foi feito assim?"**.
 
 ---
 
-## Stack
+## Sumário
 
-### FastAPI **sync** (não async)
-Pipeline de PDF (pdfplumber, Tesseract, pdf2image) é CPU-bound e bloqueante. Async FastAPI forçaria `run_in_threadpool` em todo lugar sem ganho real de throughput. Chamadas I/O (LLM, webhook) rodam em `BackgroundTasks`. Simplicidade vence.
-
-### PostgreSQL em prod **e** em dev (via docker-compose)
-Migrations Alembic têm dialetos diferentes em SQLite vs Postgres (tipos JSON, UUID, defaults, array). Manter paridade evita surpresas no deploy. SQLite segue suportado como fallback "arranque sem Docker", mas o caminho oficial é Postgres.
-
-### Conversão `postgres://` → `postgresql://`
-Railway (e Heroku) injetam `DATABASE_URL` começando com `postgres://`, mas SQLAlchemy 2.0 espera `postgresql://`. Conversão é feita no `config.py` via `field_validator`.
-
-### Frontend: vanilla JS + Alpine.js (CDN) só onde necessário
-Login, histórico e empresas ficam 100% vanilla. Apenas a tela de cadastro assistido usa Alpine (reatividade sem build step). PDF.js renderiza o preview no browser, evitando round-trip para renderização no servidor.
-
-### Background tasks + polling para cadastro assistido
-IA Vision potente leva 20–60s. HTTP síncrono funcionaria, mas UX é muito melhor com progresso real. `POST /api/extract` retorna `processing_id` imediatamente; frontend faz polling em `GET /api/extract/{id}/status`. Mesma estrutura serve para o fluxo rápido (status vira `concluido` em ~1s).
-
----
-
-## Identificação de empresa: CNPJ + fingerprint
-
-A chave de matching é composta:
-- **CNPJ** extraído do PDF (regex + fallback para razão social).
-- **Fingerprint** do layout: SHA-256 sobre texto estável da 1ª página (sem dígitos, nomes e datas) + nº de colunas da maior tabela + tamanho de página.
-
-Isto cobre:
-- Empresa com múltiplas filiais (mesmo layout, CNPJs diferentes) → mesmo esqueleto.
-- Empresa que trocou de sistema de ponto (mesmo CNPJ, fingerprint novo) → novo esqueleto versionado.
-
-Design detalhado: **Fase 4**.
+- [Contexto do produto](#contexto-do-produto)
+- [Decisões de arquitetura](#decisões-de-arquitetura)
+  - [Esqueletos por empresa](#1-esqueletos-por-empresa)
+  - [Fingerprint como chave secundária](#2-fingerprint-como-chave-secundária-de-matching)
+  - [FastAPI sync](#3-fastapi-sync-não-async)
+  - [BackgroundTasks em vez de Celery](#4-backgroundtasks-em-vez-de-celery)
+  - [Storage efêmero em memória](#5-storage-efêmero-em-memória-não-redis)
+  - [PostgreSQL em prod e dev](#6-postgresql-em-prod-e-dev-via-docker)
+  - [Senha única global](#7-senha-única-global-não-multi-usuário)
+- [Decisões de implementação](#decisões-de-implementação)
+  - [OpenRouter](#8-openrouter-em-vez-do-sdk-da-openai)
+  - [Catálogo dual de modelos](#9-catálogo-dual-potentes-vs-baratos)
+  - [Cascata de fallback](#10-cascata-de-fallback-plumber--ocr--ia-barata)
+  - [Score com breakdown exposto](#11-score-com-breakdown-exposto)
+  - [Frontend sem build step](#12-frontend-sem-build-step)
+  - [iframe em vez de PDF.js](#13-iframe-em-vez-de-pdfjs)
+  - [Checkbox opt-in de webhook](#14-checkbox-opt-in-de-webhook-na-ui)
+  - [Python entrypoint em vez de shell](#15-python-entrypoint-em-vez-de-shell)
+  - [Nomes em português no domínio](#16-nomes-em-português-no-domínio)
+- [Decisões que mudamos no caminho](#decisões-que-mudamos-no-caminho-lições-aprendidas)
+- [Adiado para v2.1+](#adiado-para-v21)
+- [Apêndice: histórico de fases](#apêndice-histórico-de-fases)
 
 ---
 
-## Adiado para v2.1
-- **Overlays visuais** (caixinhas coloridas sobre o PDF no cadastro). Mapear coordenadas PDF↔HTML é trabalhoso e valor marginal é baixo na primeira versão. V2 entrega validação textual + amostragem de 3 dias.
-- **Multi-usuário com login individual.** V2 mantém senha global por pedido explícito do usuário. `criada_por` nos modelos armazena os últimos 8 chars do cookie HMAC como proxy — quando migrar para multi-user vira FK.
+## Contexto do produto
+
+**Problema:** existe uma v1 ("PontoExtract") que recebe PDFs de cartão de ponto e extrai com IA genérica. A assertividade é ruim — cada empresa tem um layout diferente, e redescobrir o layout a cada extração é caro e impreciso.
+
+**Observação-chave:** cartões de ponto da **mesma empresa são sempre iguais** (mesmo layout, mesmo CNPJ, mesmo sistema gerador). Cartões de empresas diferentes são diferentes entre si.
+
+**Hipótese:** se aprendermos o layout de uma empresa **uma vez** (com IA potente + validação humana) e salvarmos, podemos reextrair PDFs futuros dessa mesma empresa **sem IA**, de forma determinística e barata.
+
+Essa hipótese é o pilar da v2. Se ela se verificar na prática (um esqueleto aprendido funciona para a maioria dos PDFs subsequentes daquela empresa), o sistema amortiza o custo de IA ao longo do tempo. Cada upload após o primeiro para uma empresa custa ~zero.
 
 ---
 
-## Segurança e LGPD
-- Nenhum PDF commitado: `.gitignore` bloqueia `*.pdf` exceto fixtures sintéticas nomeadas `synthetic_*.pdf`.
-- Logs não incluem conteúdo de PDFs — apenas IDs e metadados.
-- Cookies em produção: `secure=True`, `httponly=True`, `samesite=lax`.
-- `/docs`, `/redoc` e `/openapi.json` desabilitados em produção via `ENV`.
-- CORS restrito por `ALLOWED_ORIGINS` (default vazio = mesmo-origem).
+## Decisões de arquitetura
+
+### 1. Esqueletos por empresa
+
+**O que:** para cada empresa cadastrada, guardamos um JSON (o "esqueleto") que descreve como extrair dados dos PDFs dela — regex-âncora para cada campo do cabeçalho, nome e tipo de cada coluna da tabela, regras de parsing, e o método preferencial.
+
+**Alternativa considerada:** IA em todas as extrações, sem estado. É o que a v1 fazia. Descartado porque é caro, lento e pouco assertivo — cada extração paga o custo de descobrir o layout do zero.
+
+**Trade-offs aceitos:**
+- Primeira extração de uma empresa é cara (IA Vision) — mas todas as seguintes são ~grátis.
+- Exige **intervenção humana** no primeiro upload (cadastro assistido). A alternativa 100% automática é menos precisa.
+- Layouts que mudam (empresa troca de sistema de ponto) precisam de novo esqueleto. Resolvido via versionamento: novo fingerprint → nova versão de esqueleto, anterior vira inativa.
+
+**Quando reconsiderar:** se estudos de campo mostrarem que a maioria das empresas tem PDFs **muito variáveis** entre si (mês a mês), o paradigma não se sustenta.
 
 ---
 
-## Fluxo assíncrono com polling
+### 2. Fingerprint como chave secundária de matching
 
-`POST /api/extract` retorna **imediatamente** um `processing_id` e dispara `BackgroundTask`. O frontend faz polling em `GET /api/extract/{id}/status` (intervalo inicial 1.5s) até atingir estado final (`sucesso`, `sucesso_com_aviso`, `aguardando_cadastro`, `nao_cartao_ponto`, `falhou`).
+**O que:** além do CNPJ, identificamos esqueletos por um hash SHA-256[:16] do layout do PDF — SHA sobre texto estável da 1ª página (sem dígitos/nomes/datas) + nº de colunas da maior tabela + dimensões da página.
 
-Estado intermediário `aguardando_cadastro` redireciona o frontend para a tela de cadastro assistido, que consome `GET /cadastro-proposta` e confirma via `POST /cadastro-confirmar`.
+**Por quê (duas razões):**
 
-## Score de conformidade
+1. **Empresa com múltiplas filiais** — mesmo layout, CNPJs diferentes. Fingerprint igual → um esqueleto cobre todas.
+2. **Empresa que troca de sistema de ponto** — mesmo CNPJ, layout diferente. Fingerprint novo → nova versão de esqueleto (e a anterior é desativada).
 
-Combinação ponderada:
-- **30%** — fração de campos de cabeçalho preenchidos.
-- **30%** — presença de linhas na tabela (0 ou 1).
-- **40%** — fração de células `hora`/`data` que parseiam corretamente.
-- Menos penalidade por avisos (até −0.2).
+**Alternativa considerada:** só CNPJ. Não funcionaria pra filiais nem pra troca de sistema.
 
-Limiares por env var: `SCORE_CONFORMIDADE_MIN` (default 0.85) marca como `sucesso`; abaixo disso vira `sucesso_com_aviso`. `TAXA_SUCESSO_MIN_ESQUELETO` (default 0.70) marca esqueleto como `em_revisao` — só a partir de 5 extrações no histórico, pra evitar flagar esqueletos recém-criados.
+**Alternativa considerada:** fingerprint perceptual da imagem (pHash). Rejeitado porque muda entre PDFs digitais e escaneados, e porque a variação de layout dentro de uma "impressão" do mesmo sistema é alta.
 
-## Webhooks
+**Alternativa considerada:** incluir todo o texto no hash. Descartado porque o texto da tabela muda entre PDFs (datas, horários, nomes), quebrando o fingerprint.
 
-`/api/extract-api` aceita `webhook_url` no form (ou usa `DEFAULT_WEBHOOK_URL`). Ao concluir, dispara POST com:
-- Payload completo (resultado, metadata, score)
-- Header `X-PontoExtract-Signature: sha256=<hmac>` onde o HMAC usa `SESSION_SECRET` como chave
-- Retries com backoff 1s/2s/4s em erros 5xx ou de rede; 4xx não são retriados
+**Por que whitelist:** só palavras em `WHITELIST` (labels estáveis de cartão de ponto — `entrada`, `saída`, `jornada`, `funcionário`, `matrícula`, ~80 termos) entram no hash. O restante do texto é variável e polui.
 
-## Segurança
+**Quando reconsiderar:** se encontrarmos empresas diferentes com fingerprint colidente (raro pela whitelist + dimensões + colunas), podemos expandir a whitelist ou adicionar mais sinais.
 
-- **Cookies de sessão**: HMAC via `itsdangerous`, TTL 8h, `httponly`, `samesite=lax`, `secure` em produção.
-- **Rate limit**: 5 tentativas de login em 15 min por IP. Memória local (não distribuído).
-- **Security headers** em todas as respostas: CSP (permite CDNs que usamos), X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy strict-origin-when-cross-origin, Permissions-Policy fechado, HSTS em produção.
-- **Exception handler central**: `PontoExtractError` → JSON com `{detail, code}` e status HTTP apropriado.
-- **LGPD**: `DELETE /api/history/{id}` para retenção; apagar Processamento não apaga Empresa/Esqueleto (metadados de layout, não dados pessoais).
+---
 
-## O que NÃO foi testado localmente (honesto)
+### 3. FastAPI sync, não async
 
-A máquina de desenvolvimento tem Python 3.14, sem Docker e sem wheels de `pydantic-core` para a versão 3.14. O trabalho foi feito e validado com:
-- `python -m py_compile` em todos os arquivos `.py` criados ou modificados.
-- Validação estática de configs (TOML, YAML, Dockerfile, .env.example).
-- Design review de cada módulo.
+**O que:** FastAPI rodando em modo síncrono, com `SessionLocal` do SQLAlchemy 2.0 (não `AsyncSession`).
 
-**Não rodei**:
-- `docker-compose up` de ponta a ponta. Primeira subida real é responsabilidade do operador.
-- `alembic upgrade head` contra Postgres real. Deve rodar limpo (migration manualmente testada em sintaxe), mas pode revelar algum detalhe de tipo.
-- `pytest` — os testes são válidos sintaticamente e logicamente, mas não foram executados nesta máquina. Rodar `pytest` no ambiente Docker (Python 3.11) é o próximo passo.
-- Chamadas reais à OpenRouter / Tesseract / pdf2image / Poppler. O pipeline está estruturalmente completo; o primeiro upload com PDF real vai confirmar se prompts, parsing e OCR funcionam como projetado.
-- Frontend renderizado no browser. PDF.js via ESM e Alpine via CDN foram escolhidos por serem estáveis, mas o layout da tela de cadastro assistido merece tuning ao ver um PDF real dentro.
+**Por quê:** o pipeline crítico é **CPU-bound e bloqueante**:
 
-## Pendências para a primeira revisão pós-deploy
+- `pdfplumber.extract_tables()` — CPU intenso
+- `pytesseract.image_to_data()` — ainda mais
+- `pdf2image.convert_from_bytes()` — idem
 
-1. Criar um diretório `tests/fixtures/pdfs/` com 1 ou 2 PDFs **sintéticos** (gerados por fpdf2) nomeados `synthetic_*.pdf` — o `.gitignore` permite esses por exceção.
-2. Rodar o fluxo completo manualmente com um PDF real (os "verde - *.pdf" que você colocou na raiz) e ajustar:
-   - Qualidade da proposta do LLM potente (prompt em `services/cadastro_assistido.py`).
-   - Regex padrão de CNPJ/labels para os layouts reais.
-   - Presença/ausência de tabelas quando pdfplumber varia.
-3. Confirmar que o custo estimado do cadastro assistido (`_custo_estimado` em `services/cadastro_assistido.py`) bate com a tabela real do OpenRouter na data.
-4. Revisar se o token TTL do cookie (8h) atende a expectativa de uso do operador.
+Nada disso é async nativo. Se fôssemos async, teríamos que envolver tudo em `run_in_threadpool` — ganho zero de throughput, complexidade extra, traces mais confusos.
 
-## Próximas melhorias (v2.1+)
+**Para I/O (LLM, webhook):** usamos `BackgroundTasks` do FastAPI. O request HTTP retorna imediatamente com `processing_id`; o trabalho real roda em thread do pool. Funciona bem para 1 réplica com os volumes atuais.
 
-Fora do escopo desta v2.0, mas valem planejamento:
+**Alternativa considerada:** FastAPI async + `asyncpg`. Rejeitado pela razão acima, e porque migrations Alembic async são mais chatas.
 
-- **Overlays visuais** (caixinhas coloridas sobre o PDF no cadastro). Alta complexidade, alto valor de UX.
-- **Multi-usuário** com emails individuais e permissões (admin vs operador).
-- **Rate limit distribuído** via Redis (hoje é memória local — se escalar para múltiplas réplicas, cada processo tem seu contador).
-- **Versionamento de esqueletos com rollback**: hoje nova versão desativa a anterior; poderia permitir voltar.
-- **UI de edição campo-a-campo da estrutura**: hoje o usuário edita JSON no textarea; formulário guiado seria mais acessível.
-- **Fallback automático plumber → OCR guiado**: hoje só existe fallback para IA barata. Para PDFs escaneados sem exemplos, OCR guiado direto no esqueleto seria mais barato.
-- **Dashboard de métricas**: taxa de acerto por esqueleto ao longo do tempo, custo acumulado, volume por empresa.
-- **Agrupamento por "empresa matriz"**: quando várias empresas compartilham fingerprint, sugerir vinculação.
-- **Retenção automática**: cron que apaga processamentos mais antigos que N dias (configurável).
-- **Exportação**: download do histórico filtrado em CSV/Excel.
+**Quando reconsiderar:** se o volume crescer a ponto de saturar o thread pool (40 threads default do uvicorn) com LLM/webhooks concorrentes. Antes disso, escala horizontal via réplicas.
 
-## Histórico de atualizações
+---
 
-- **Fases 1-4**: decisões iniciais da stack + identificação/fingerprint.
-- **Fases 5-6**: esquema de extração via esqueleto + estrutura JSON formalizada.
-- **Fases 7-8**: cadastro assistido com Vision + UI com PDF.js + Alpine.
-- **Fases 9-11**: score refinado, drift, endpoints de gestão, webhooks.
-- **Fase 12**: security headers, exception handler central, endpoint LGPD de deleção.
-- **Fase 13**: testes (unitários puros + DB in-memory + mocks de webhook/LLM) + pyproject.toml.
+### 4. BackgroundTasks em vez de Celery
+
+**O que:** processamento assíncrono via `fastapi.BackgroundTasks`, que roda no mesmo processo do uvicorn.
+
+**Trade-offs aceitos:**
+- Se o container cair durante um task, o task é perdido. **Mitigação:** sweeper marca processamentos órfãos como `falhou` no próximo startup.
+- Escala só vertical (uma réplica). **Mitigação:** Railway default é 1 réplica; upgrade quando for necessário.
+
+**Alternativas rejeitadas:**
+- **Celery/RQ + Redis** — dependência extra, infraestrutura extra. Para o volume atual (estimativa: dezenas a centenas de PDFs/dia), é overkill.
+- **Task queue persistente em DB** (huey, dramatiq-pg) — viável, mas não justificado até ter volume que exija.
+
+**Quando reconsiderar:**
+- Processamento está demorando mais que o timeout do Railway (~5min)
+- Volume > 1000 PDFs/dia
+- Precisa garantir entrega em caso de crash (hoje aceitável re-uploadar)
+
+---
+
+### 5. Storage efêmero em memória (não Redis)
+
+**O que:** `app/services/storage.py` implementa dict com TTL 1h e lock, mantendo bytes de PDFs, propostas de cadastro e metadados entre o momento do upload e a confirmação do cadastro / disparo do webhook.
+
+**Por quê:** no Railway, o filesystem é efêmero mesmo — escrever em `/tmp` não sobrevive a restart. Disco persistente exige volume pago. Redis seria correto mas adiciona dependência.
+
+**Ciclo de vida:**
+- Upload → grava `pdf_bytes`, `metadata` (webhook_url, modelo_potente)
+- Cadastro assistido → grava `proposta`
+- Confirmação/cancelamento → limpa tudo
+- Sweeper passa e limpa órfãos se algo escapar
+- TTL 1h faz a varredura automática
+
+**Trade-offs aceitos:**
+- Múltiplas réplicas quebrariam (upload na A, confirmação bate na B sem o PDF). Hoje é 1 réplica, OK.
+- Memória de produção não deve explodir: rate limit de upload (30/10min por IP) + MAX_UPLOAD_SIZE_MB (20).
+
+**Quando reconsiderar:** ao escalar horizontalmente. Migrar pra Redis ou object storage (S3-compat).
+
+---
+
+### 6. PostgreSQL em prod e dev (via Docker)
+
+**O que:** Postgres 16 em produção (Railway) e desenvolvimento (`docker-compose.yml`). SQLite fica como fallback "arranque rápido sem Docker", mas não é o caminho oficial.
+
+**Por quê:** Alembic gera SQL diferente para SQLite vs Postgres em casos sutis — tipos JSON, UUID, defaults, ARRAY. Não testar contra Postgres em dev é receita para quebrar migrations em produção.
+
+**Alternativa considerada:** desenvolver em SQLite. Já levamos susto com `sa.false()` que não existe em SQLite. Abandonada.
+
+**Conversão `postgres://` → `postgresql://`:** Railway e Heroku injetam `DATABASE_URL` começando com `postgres://` (depreciado mas mantido), mas SQLAlchemy 2.0 espera `postgresql://`. Conversão automática no `app/config.py::_fix_postgres_url` — pegadinha famosa que causou horas de bug em muitos projetos.
+
+---
+
+### 7. Senha única global, não multi-usuário
+
+**O que:** uma única `ACCESS_PASSWORD` no env para todos os operadores. Cookie HMAC-signed de 8h.
+
+**Por quê:** pedido explícito do cliente na fase de planejamento — "senha global, single user". Simplifica auth, simplifica UI, simplifica esquema de banco.
+
+**Trade-offs aceitos:**
+- Não dá pra diferenciar ações por usuário. Campo `criado_por` nos modelos guarda os últimos 8 chars do cookie session — proxy útil só pra debug (cookies diferentes = operadores diferentes).
+- Rotação de senha obriga todos a relogar.
+
+**Quando reconsiderar:** primeira necessidade de auditoria por usuário, permissões diferenciadas (admin vs operador), ou team > 3-4 pessoas.
+
+**Migração planejada:** `criado_por` vira FK para tabela `usuarios` quando migrar. Schema do banco já aceita string, não precisa de migration pra dados existentes.
+
+---
+
+## Decisões de implementação
+
+### 8. OpenRouter em vez do SDK da OpenAI
+
+**O que:** falamos direto com a API do OpenRouter via `httpx`, sem usar o SDK da OpenAI (apesar da API ser compatível).
+
+**Por quê:**
+- **Múltiplos provedores** em um endpoint (Anthropic, OpenAI, Google, xAI, DeepSeek). Trocar de modelo é só trocar uma string.
+- **Sem SDK pesado** — `openai` puxaria `pydantic`, `typing-extensions`, etc. Como já usamos `httpx` pra webhook, reusar é natural.
+- **Controle sobre retries e erros** — precisamos diferenciar "modelo rejeitou imagem" de erro genérico, o que exige inspecionar o body do 4xx. Mais fácil com httpx cru.
+
+**Trade-offs aceitos:**
+- Schemas de chamada mantidos à mão (messages, response_format). Não é grande problema porque usamos um subconjunto pequeno.
+
+---
+
+### 9. Catálogo dual (potentes vs baratos)
+
+**O que:** dois catálogos em `app/config.py`:
+- `modelos_potentes_catalogo` — usados no cadastro assistido, com Vision
+- `modelos_baratos_catalogo` — usados no fallback IA em extrações futuras
+
+Cada entrada tem `id` + `suporta_visao` (bool).
+
+**Por quê duas listas:**
+- Cadastro assistido costuma ser Vision (analisar imagem da 1ª página), então o modelo **precisa** ou idealmente suporta imagem.
+- Fallback em extração posterior é sobre texto do PDF — modelo barato basta. A necessidade de visão é opcional.
+- Usuário escolhe o modelo potente na tela de upload; escolhe o barato na tela de cadastro (fica salvo em `estrutura.modelo_fallback` do esqueleto).
+
+**Por que `suporta_visao` explícito:** DeepSeek e Grok 4 fast são text-only. Se mandar imagem, retornam 404 "No endpoints found that support image input". O backend precisa saber pra escolher o caminho certo de antemão. Caso o provedor surpreenda (mudança na API), temos fallback via `LLMImageUnsupportedError`.
+
+**Por que whitelist fechada:** evita que um usuário malicioso (se conseguir passar pelo auth) mande qualquer modelo, inclusive pagos por token caríssimos. A whitelist define o que a organização topa pagar.
+
+**Adicionar modelo novo:** 1 linha no catálogo. Ver CONTRIBUTING.md.
+
+---
+
+### 10. Cascata de fallback: plumber → OCR → IA barata
+
+**O que:** em `app/services/extracao_esqueleto.py::aplicar_esqueleto`, três tentativas gatilhadas pela qualidade da anterior:
+
+1. Método preferencial do esqueleto
+2. OCR guiado — se plumber deu ruim E PDF parece escaneado
+3. IA barata — se ainda está ruim
+
+**Por que automático:** PDFs são imprevisíveis. Mesmo um layout conhecido pode vir ruim hoje (compressão diferente, escaneado por acidente, etc.). Tentar só o método declarado e falhar é ruim — tentar os outros antes de desistir é o certo.
+
+**Como decide "está ruim"** (`_diagnostica_extracao`):
+
+- `zero_linhas`: óbvio
+- `colunas_tipadas_todas_vazias`: plumber achou a tabela mas os valores de hora/data vieram todos vazios → sinal clássico de que a tabela foi detectada errado
+- `maioria_linhas_com_1_celula`: >70% das linhas com só 1 célula preenchida e pelo menos 3 linhas → é ruído, não tabela
+
+**Por que essas três:** antes tínhamos só `zero_linhas`. Isso permitia plumber extrair 2 linhas de 30 e nunca cair no fallback. Os outros dois sinais cobrem "extração parcial quebrada".
+
+**Preservação de cabeçalho:** na cascata, se um método novo vier com cabeçalho vazio mas o anterior tinha cabeçalho populado, mantemos o anterior. Evita perder informação útil.
+
+**Anti-regressão nas linhas:** se a IA barata traz **menos** linhas que o método anterior, mantemos o anterior e registramos no aviso. A IA pode errar pra baixo — não queremos aceitar degradação.
+
+---
+
+### 11. Score com breakdown exposto
+
+**O que:** `app/services/conformidade.py::calcular_score_detalhado` retorna um dataclass com cada componente + penalidade + score final. Vai pro `resultado_json.score_breakdown` no banco e é renderizado no modal de detalhes do histórico.
+
+**Por quê:** sem breakdown, quando um score parece estranho, ninguém sabe onde perdeu ponto. Com breakdown, em 2 segundos você vê `frac_celulas: 0.0, tem_colunas_tipadas: true` e sabe que as células hora/data falharam no parse.
+
+**Pesos atuais (depois de 2 rebalanceamentos):**
+
+- **40%** `tem_linhas` (binário 0/1) — sinal mais forte e inequívoco
+- **30%** `frac_cabecalho` (fração)
+- **30%** `frac_celulas` (fração de células hora/data bem parseadas) — **1.0 se o esqueleto não declara colunas tipadas**
+
+Mais penalidade: 0.02 por aviso, capada em 0.10.
+
+**Evolução:** no início era 30/30/40. Um usuário reportou uma extração que visualmente estava perfeita mas deu score 45%. Diagnóstico: formato "08h30" (hora com H) não passava no regex validador do score, todas as células hora eram marcadas inválidas, 40% do score virava 0. Fix: rebalancear para 40/30/30 + tornar validador permissivo (aceita `HH:MM`, `HH:MM:SS`, `HHhMM`, `DD/MM`, `DD/MM/YYYY`, `DD-MM-YYYY`).
+
+**Quando ajustar pesos novamente:** se um padrão de score "fora da realidade" aparecer em produção. O breakdown no banco vira histórico útil — dá pra fazer um relatório mostrando correlação entre componentes e aceitação humana das extrações.
+
+---
+
+### 12. Frontend sem build step
+
+**O que:** HTML + CSS (Tailwind CDN) + JS vanilla. Alpine.js via CDN só na tela de cadastro assistido.
+
+**Por quê:**
+- Tailwind JIT no CDN é bom o suficiente pra um painel interno
+- Sem Node.js, sem npm, sem bundler, sem `dist/` pra manter, sem CI de build
+- Dev loop: edita arquivo → F5 no browser
+
+**Alternativas rejeitadas:**
+- React / Vue / Svelte + Vite — overkill para painel com 5 telas. Também puxaria TypeScript e uma roda de deps por tela.
+- Server-rendered templates (Jinja) — menos interativo. A tela de cadastro tem estado complexo (CNPJs dinâmicos, JSON editável com validação live); em Jinja viraria spaghetti de data attributes + JS.
+
+**Alpine só no cadastro:** é a única tela com reatividade complexa. Nas outras, os cliques disparam actions diretas. Vanilla bastou.
+
+**Trade-offs aceitos:**
+- Tailwind CDN puxa ~50kb toda vez — aceitável num painel interno com cache.
+- Sem type checking — a disciplina tem que vir dos dev. JSDoc se virar necessário.
+
+---
+
+### 13. iframe em vez de PDF.js
+
+**O que:** no cadastro assistido, o preview do PDF é um `<iframe>` apontando para uma blob URL gerada do fetch.
+
+**Por que não PDF.js (a escolha original):** tentamos com PDF.js via CDN e ESM. Conseguimos fazer funcionar, mas:
+
+- CSP precisa liberar `script-src`, `worker-src` e `connect-src` para o CDN
+- O worker carrega de outro endpoint e é bloqueado silenciosamente por CSP padrão
+- Import ESM via `<script type="module">` tem timing (o `window.pdfjsLib` demora a aparecer)
+- Quando qualquer um desses falha, o canvas fica vazio sem feedback ao usuário
+
+Frustrante de debugar e frágil.
+
+**Solução:** iframe com blob URL. O navegador usa o viewer nativo (zoom, paginação, busca — tudo grátis). CSP: `frame-src 'self' blob:`. Zero dependência externa pra isso.
+
+**Trade-off aceito:** overlays coloridos sobre o PDF (caixinhas destacando campos) ficam inviáveis com iframe. Já estavam adiados para v2.1 mesmo.
+
+---
+
+### 14. Checkbox opt-in de webhook na UI
+
+**O que:** na tela de upload, aparece um checkbox "Enviar resultado para o webhook configurado" — **só aparece** se `DEFAULT_WEBHOOK_URL` estiver configurado no servidor.
+
+**Por quê opt-in:** nem todo upload pela UI deve ir pro webhook. O operador pode querer extrair só para ver o resultado na tela.
+
+**Por que não campo livre de URL na UI:** webhook secret é global (`SESSION_SECRET`). Permitir URL arbitrária abriria caminho para usar o HMAC signing do sistema em endpoints externos não autorizados. Opt-in em uma URL pré-configurada é a opção segura.
+
+**Regra extra:** cadastro assistido **não dispara webhook**, nem o upload inicial, nem após a confirmação do cadastro. Justificativa: cadastro é "trabalho humano em progresso", não um evento para publicar. Se o checkbox estiver marcado e o PDF cair em cadastro, a URL é **removida do storage** para não disparar mesmo se o user confirmar depois.
+
+---
+
+### 15. Python entrypoint em vez de shell
+
+**O que:** `entrypoint.py` (não `entrypoint.sh`) é o `CMD` do Dockerfile.
+
+**Por quê:** o `/bin/sh` no `debian-slim` é o `dash`, que faz full buffering de stdout quando não é TTY. Isso significa que `echo "[entrypoint] ..."` ficava preso no buffer até o processo terminar — logs não apareciam em tempo real, dificultando debug de subida.
+
+Python, com `print(flush=True)` ou `python -u`, flushea de forma confiável. Bonus: se o import do `main` quebrar, temos traceback Python completo em vez de "comando falhou silenciosamente".
+
+**Arquivo:** `entrypoint.py`:
+1. Imprime env vars relevantes (sem valores sensíveis)
+2. Roda `alembic upgrade head` via subprocess
+3. Verifica que `import main` funciona
+4. `os.execvp` para `python -m uvicorn main:app` (uvicorn vira PID 1 e recebe sinais)
+
+---
+
+### 16. Nomes em português no domínio
+
+**O que:** modelos, métodos de serviço, campos do esqueleto: **português**. Infra HTTP, libs, tipos: **inglês**.
+
+Exemplos:
+- Tabelas: `empresas`, `esqueletos`, `processamentos`
+- Modelo: `Esqueleto.versao`, `Esqueleto.estrutura`
+- Enum: `StatusProcessamento.AGUARDANDO_CADASTRO`
+- Service: `aplicar_esqueleto`, `gerar_proposta`, `identificar_empresa`
+- Infra: `main.py`, `SessionLocal`, `get_db`, `BackgroundTasks`
+
+**Por quê:** domínio é trabalhista brasileiro, stakeholders (operadores, clientes) falam português. "Esqueleto" em inglês seria "skeleton" — ok, mas "empresa" vira "company"? "Processamento" vira "processing"? O mapping já seria cognitivamente pesado.
+
+**Por quê inglês na infra:** `get_database_session` em vez de `obter_sessao_banco` quebra padrões de bibliotecas Python (SQLAlchemy, FastAPI) e torna busca/documentação mais difícil.
+
+Essa divisão é consistente no código. Ao criar coisas novas, siga.
+
+---
+
+## Decisões que mudamos no caminho (lições aprendidas)
+
+Boas engenharias documentam onde erraram. Aqui está o que foi revisado.
+
+### `railway.toml startCommand` vs `Dockerfile CMD`
+
+**Era assim:** `railway.toml` tinha `startCommand = "alembic upgrade head && uvicorn..."` e o `Dockerfile` tinha `CMD` equivalente.
+
+**Problema descoberto no deploy:** Railway prioriza `startCommand` do `.toml` sobre `CMD` do Dockerfile. O `entrypoint.py` adicionado como CMD nunca era chamado. Deploys crasheavam silenciosamente porque os logs estavam no `entrypoint.py` — que nunca rodava.
+
+**Fix:** removido `startCommand` do `.toml`. O Dockerfile é fonte única da verdade.
+
+**Lição:** não repetir configuração em múltiplos lugares. Se o Dockerfile define o comando, não defina de novo no `.toml`. Se um override for realmente necessário, seja explícito sobre **um** ser prioritário.
+
+---
+
+### Limite de páginas de 50 → sem limite
+
+**Era assim:** `MAX_PAGES_DEFAULT = 50` em `app/utils/pdf.py`. PDFs maiores eram rejeitados com erro.
+
+**Problema:** cartões de ponto de empresas médias e grandes têm facilmente 100+ páginas (1 por funcionário). Limite arbitrário cortava uso legítimo.
+
+**Fix:** `validar_pdf_bytes(max_pages=None)` — default sem limite. Parâmetro ainda existe pra chamadores que queiram restringir.
+
+**Lição:** limites arbitrários protegem contra casos-limite, mas se não forem baseados em dados reais de uso, viram obstáculos. Se precisar de limite, usar env var (`MAX_UPLOAD_SIZE_MB` já existe e protege memória, que é o risco real).
+
+---
+
+### Score 30/30/40 → 40/30/30 + validação permissiva
+
+**Era assim:** 30% cabeçalho, 30% linhas, 40% células tipadas. Validador de hora só aceitava `HH:MM`.
+
+**Problema:** usuário reportou score 45% em extração visualmente perfeita. Debug revelou:
+- PDF tinha horas em formato `08h30`
+- `_parse_hora` do extrator caía no fallback "mantém texto original"
+- Validador do score rejeitava `08h30`, marcava células como inválidas
+- `frac_celulas = 0`, 40% do score sumia
+
+**Fix triplo:**
+1. Rebalancear: 40/30/30. Linhas é sinal mais forte e binário — merece peso maior.
+2. Tornar validador permissivo: `HH:MM`, `HH:MM:SS`, `HHhMM`, `DD/MM`, datas com traço, etc.
+3. Expor `score_breakdown` no `resultado_json` — pra próxima surpresa ser debugável.
+
+**Lição:** quando um número parece errado, dê visibilidade antes de assumir que está certo. Breakdown exposto > "confie no algoritmo".
+
+---
+
+### IA barata exigia `exemplos_validados != []`
+
+**Era assim:** `if not linhas and exemplos:` — só acionava com zero linhas e exemplos não-vazios.
+
+**Problemas:**
+1. "Zero linhas" era ingênuo. Plumber podia extrair 2 de 30 linhas — nunca caía no fallback.
+2. Os exemplos eram salvos pela UI com `trecho_pdf: ''` (inútil pra few-shot).
+3. Se o esqueleto fosse salvo sem exemplos (caso comum), fallback nunca rodava.
+
+**Fix em 4 frentes:**
+1. `_diagnostica_extracao` detecta extração ruim por 3 critérios (zero linhas, todas colunas hora/data vazias, maioria de linhas com 1 célula).
+2. Removida a dependência de exemplos — IA barata funciona só com a estrutura declarada.
+3. `cadastro-confirmar` agora preenche `trecho_pdf` com snippet real do PDF se o frontend mandar vazio.
+4. Prompt reescrito: lista explicitamente os campos esperados, tipos de coluna, regras de formatação, forma exata do JSON de saída. Modelo não adivinha mais.
+
+**Lição:** "heurística de acionamento" precisa ser auditável e permissiva. "Travar" um fallback em condições muito específicas é armadilha — o fallback é justamente pra casos que você não previu.
+
+---
+
+### PDF.js → iframe
+
+Já documentado acima (decisão #13). Lição: dependências externas frágeis (CSP + ESM + CDN + worker) não compensam quando existe solução nativa (iframe).
+
+---
+
+### Rate limit de cadastro "por empresa"
+
+**Ideia inicial (abandonada antes de implementar):** limitar cadastros assistidos por empresa para evitar abuso.
+
+**Por que abandonamos:** cadastro assistido é **naturalmente raro** — só a primeira vez que vê uma empresa. Dos próximos milhares de PDFs daquela empresa, zero envolvem cadastro. Limitar por empresa seria complicar à toa. O rate limit de upload (30 por IP em 10 min) já protege contra loop acidental.
+
+**Lição:** rate limits devem proteger o vetor de abuso real. Cadastro de empresa nova não é.
+
+---
+
+## Adiado para v2.1+
+
+Coisas que conscientemente não entraram na v2.0. Ordem sugerida por prioridade de valor × esforço:
+
+### Alta prioridade
+
+1. **Dashboard de métricas** — taxa de acerto por esqueleto ao longo do tempo, custo acumulado de LLM, volume por empresa. Tudo que falta é visualização; dados já estão no banco (`processamentos.score_conformidade`, `processamentos.custo_estimado_usd`, `esqueletos.taxa_sucesso`, `esqueletos.total_extracoes`).
+
+2. **Retenção automática** — cron que apaga processamentos mais antigos que N dias (configurável por empresa). Hoje a retenção é manual via `DELETE /api/history/{id}`. LGPD manda prever.
+
+3. **Multi-usuário simples** — email + senha individual, sem perfis complexos. Migrar `criado_por` de string para FK `usuario_id`.
+
+### Média prioridade
+
+4. **UI de edição campo-a-campo da estrutura do esqueleto** — hoje é textarea JSON com validação. Um formulário guiado (um input por campo, dropdown de tipo de coluna, etc.) tornaria acessível a usuários não-técnicos.
+
+5. **Overlays visuais no cadastro assistido** — caixinhas coloridas sobre o PDF destacando onde cada campo foi encontrado. Alta UX, implementação trabalhosa (coordenar pdf→html).
+
+6. **Rollback de versão de esqueleto** — hoje nova versão desativa a anterior permanentemente. Poder voltar seria útil pra corrigir regressões.
+
+7. **API key separada para integrações** — hoje o `/api/extract-api` usa o mesmo cookie da UI. Uma API key desassociada permitiria revogação independente.
+
+8. **Exportação CSV/Excel** — download do histórico filtrado. Baixo esforço, alto valor para usuários que usam Excel.
+
+### Baixa prioridade
+
+9. **Rate limit distribuído** (Redis) — só faz sentido quando escalar pra múltiplas réplicas.
+
+10. **Agrupamento de empresas matriz/filial** — se 5 empresas compartilham fingerprint, sugerir visualmente que talvez sejam a mesma.
+
+11. **Celery/task queue persistente** — só se o volume ficar > 1000 PDFs/dia ou crashes de container começarem a ser problema real.
+
+12. **Testes de integração com PDFs reais** — fixtures sintéticas geradas por `fpdf2`, testes end-to-end do pipeline. Hoje o pipeline é testado manualmente contra PDFs de produção.
+
+### Possivelmente nunca
+
+- **Async full** do FastAPI — só se todo o stack de PDF tiver equivalente async. Unlikely.
+- **Frontend em framework** — só se a UI crescer para >15 telas com estado compartilhado complexo.
+
+---
+
+## Apêndice: histórico de fases
+
+O projeto foi construído em 13 fases ordenadas. Este registro é mantido porque alguns nomes de arquivos e comentários referenciam "Fase X" no repo.
+
+| Fase | Entrega |
+|---|---|
+| 1 | Setup base: Dockerfile, docker-compose, config.py, health check, Alembic configurado |
+| 2 | Autenticação: login/logout, cookie HMAC, rate limit, middleware auth_gate |
+| 3 | Models + primeira migration: Empresa, EmpresaCNPJ, Esqueleto, Processamento |
+| 4 | Serviços base: utils/pdf, utils/ocr, services/llm, services/fingerprint |
+| 5 | Classificador + identificação (CNPJ + matching) |
+| 6 | Extração aplicando esqueleto (plumber_direto inicial) |
+| 7 | Cadastro assistido backend: BackgroundTask, IA Vision, endpoints |
+| 8 | Cadastro assistido frontend: PDF preview, Alpine, dashboard |
+| 9 | Score de conformidade + drift detection |
+| 10 | Endpoints de histórico, empresas, esqueletos |
+| 11 | Webhooks + endpoint externo `/api/extract-api` |
+| 12 | Security headers, exception handler central, LGPD delete |
+| 13 | Testes (unit + integração com DB in-memory) + pyproject.toml |
+
+Após a fase 13, várias iterações adicionaram:
+- Sweeper de órfãos
+- Endpoint de modelos disponíveis
+- Dropdown de modelo potente/barato
+- Upload múltiplo com fila persistente
+- OCR guiado funcional (antes era stub)
+- Reescrita da lógica de IA barata
+- Checkbox opt-in de webhook
+- Remoção do limite de páginas
+- Rebalanceamento do score
+- Troca PDF.js → iframe
+
+Veja `git log --oneline` para o registro completo.
+
+---
+
+## Quando atualizar este documento
+
+Toda vez que uma decisão **não óbvia** for tomada, adicione aqui. Não decisões mecânicas ("renomeei variável X"), mas decisões arquiteturais ou de produto onde alguém poderia razoavelmente ter escolhido diferente.
+
+Formato recomendado para novas entradas:
+
+```
+### N. Título curto da decisão
+
+**O que:** o que foi decidido, em 1-2 frases.
+
+**Por quê:** contexto, problema, justificativa.
+
+**Alternativas consideradas:** o que cogitamos e descartamos.
+
+**Trade-offs aceitos:** o que abrimos mão.
+
+**Quando reconsiderar:** sinais de que a decisão precisa ser revisitada.
+```
+
+Não deixe o documento virar changelog — para isso é o `git log`. Aqui é por que as coisas são do jeito que são, escrito para o próximo humano entender em 5 minutos, não 5 horas.
