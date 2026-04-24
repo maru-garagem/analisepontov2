@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
-from app.routes import auth, health
+from app.routes import auth, extract, health
 from app.utils.security import SESSION_COOKIE_NAME, verify_session_token
 
 settings = get_settings()
@@ -67,3 +67,4 @@ async def auth_gate(request: Request, call_next):
 
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
+app.include_router(extract.router, prefix="/api")
