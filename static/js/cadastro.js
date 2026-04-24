@@ -14,12 +14,15 @@ function cadastroApp() {
     confianca: null,
     estruturaTexto: '{}',
     erroEstrutura: null,
+    enviando: false,   // bloqueio de clique duplo
+    cancelando: false,
     form: {
       nome_empresa: '',
       cnpjs: [],
     },
 
     get podeConfirmar() {
+      if (this.enviando || this.cancelando) return false;
       if (this.erroEstrutura) return false;
       if (this.usarEmpresaExistente) return true;
       return this.form.nome_empresa.trim().length > 0;
@@ -112,6 +115,7 @@ function cadastroApp() {
     },
 
     async confirmar() {
+      if (this.enviando) return;
       let estrutura;
       try {
         estrutura = JSON.parse(this.estruturaTexto);
@@ -119,6 +123,10 @@ function cadastroApp() {
         App.toast('JSON da estrutura inválido.', 'error');
         return;
       }
+
+      // Feedback imediato — desabilita botões antes do request.
+      this.enviando = true;
+      App.toast('Salvando esqueleto e extraindo...', 'info');
 
       const payload = {
         nome_empresa: this.form.nome_empresa || this.empresa_candidata_nome || 'Empresa',
@@ -135,27 +143,23 @@ function cadastroApp() {
           `/api/extract/${this.processingId}/cadastro-confirmar`,
           payload
         );
-        App.toast('Esqueleto salvo. Extraindo...', 'success');
         sessionStorage.setItem('ultimo_resultado', JSON.stringify(res));
         if (this.pdfUrl) {
           try { URL.revokeObjectURL(this.pdfUrl); } catch {}
         }
         location.href = '/';
       } catch (err) {
+        this.enviando = false;
         App.toast('Erro ao confirmar: ' + err.message, 'error');
       }
     },
 
     async cancelar() {
+      if (this.cancelando) return;
       if (!confirm('Cancelar o cadastro? O esqueleto não será salvo.')) return;
-      try {
-        await App.apiPostJson(
-          `/api/extract/${this.processingId}/cadastro-cancelar`,
-          {}
-        );
-      } catch {
-        // ignora — já saindo
-      }
+      this.cancelando = true;
+      // Redireciona imediatamente — o cancel no servidor vira fire-and-forget.
+      App.apiPostJson(`/api/extract/${this.processingId}/cadastro-cancelar`, {}).catch(() => {});
       if (this.pdfUrl) {
         try { URL.revokeObjectURL(this.pdfUrl); } catch {}
       }

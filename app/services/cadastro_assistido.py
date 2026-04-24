@@ -138,11 +138,15 @@ def _custo_estimado(usage: dict[str, Any] | None, modelo: str) -> float | None:
     return round((inp * preco_in + out * preco_out) / 1_000_000, 6)
 
 
-def gerar_proposta(pdf_bytes: bytes) -> Proposta:
+def gerar_proposta(pdf_bytes: bytes, modelo: str | None = None) -> Proposta:
     """
     Analisa a primeira página do PDF via LLM Vision e retorna uma proposta
-    de esqueleto + amostra. Levanta NotACardPontoError se o modelo
-    identificar que o documento não é cartão de ponto.
+    de esqueleto + amostra. Se `modelo` não for passado, usa o default das
+    settings (OPENROUTER_MODEL_POTENTE). Modelos inválidos/fora da whitelist
+    caem silenciosamente no default.
+
+    Levanta NotACardPontoError se o modelo identificar que o documento não
+    é cartão de ponto.
     """
     # 1. Rasteriza primeira página
     imagens = rasterizar(pdf_bytes, dpi=150, first_page=1, last_page=1)
@@ -169,14 +173,20 @@ def gerar_proposta(pdf_bytes: bytes) -> Proposta:
     ]
 
     settings = get_settings()
-    modelo = settings.OPENROUTER_MODEL_POTENTE
+    modelo_escolhido = modelo if modelo in settings.modelos_potentes_permitidos else None
+    modelo_efetivo = modelo_escolhido or settings.OPENROUTER_MODEL_POTENTE
+    if modelo and not modelo_escolhido:
+        logger.warning(
+            "modelo_fora_whitelist solicitado=%s caindo_no_default=%s",
+            modelo, modelo_efetivo,
+        )
     client = get_llm_client()
 
     try:
         # Usa chat (não chat_json) para ter acesso ao usage — parseamos o
         # JSON manualmente após validar a existência dos campos obrigatórios.
         resposta = client.chat(
-            model=modelo,
+            model=modelo_efetivo,
             messages=messages,
             max_tokens=4000,
             temperature=0.1,
@@ -203,7 +213,7 @@ def gerar_proposta(pdf_bytes: bytes) -> Proposta:
     if data.get("erro") == "nao_cartao_ponto":
         raise NotACardPontoError("IA identificou que o documento não é cartão de ponto.")
 
-    custo = _custo_estimado(resposta.get("usage"), modelo)
+    custo = _custo_estimado(resposta.get("usage"), modelo_efetivo)
 
     return Proposta(
         nome_empresa=data.get("nome_empresa"),
@@ -214,7 +224,7 @@ def gerar_proposta(pdf_bytes: bytes) -> Proposta:
         estrutura=data.get("estrutura") or {},
         amostra_linhas=data.get("amostra_linhas") or [],
         confianca=data.get("confianca"),
-        modelo_usado=modelo,
+        modelo_usado=modelo_efetivo,
         custo_estimado_usd=custo,
         raw=data,
     )

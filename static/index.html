@@ -22,31 +22,38 @@
 
   <main class="max-w-5xl mx-auto px-6 py-8 space-y-6">
     <section id="uploadCard" class="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
-      <h2 class="font-medium mb-2">Enviar PDF de cartão de ponto</h2>
+      <h2 class="font-medium mb-2">Enviar PDFs de cartão de ponto</h2>
       <p class="text-sm text-slate-500 mb-4">
-        O sistema detecta a empresa automaticamente. Se for nova, você será levado ao cadastro assistido.
+        Arraste múltiplos PDFs ou selecione vários. Cada arquivo é processado independentemente em segundo plano — você pode fechar esta aba e acompanhar pelo Histórico.
       </p>
+
+      <label class="block mb-4">
+        <span class="text-sm text-slate-700">Modelo de IA para cadastro (só usado em empresas novas)</span>
+        <select id="modeloSelect" class="mt-1 w-full md:w-96 border border-slate-300 rounded px-3 py-2 text-sm">
+          <option value="">Padrão do servidor</option>
+        </select>
+      </label>
+
       <div
         id="dropZone"
         class="border-2 border-dashed border-slate-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition"
       >
-        <p class="text-slate-600">Arraste um PDF aqui ou clique para selecionar.</p>
-        <input id="fileInput" type="file" accept="application/pdf" class="hidden" />
+        <p class="text-slate-600">Arraste PDFs aqui ou clique para selecionar.</p>
+        <input id="fileInput" type="file" accept="application/pdf" class="hidden" multiple />
       </div>
-      <div id="progress" class="hidden mt-4">
-        <div class="flex items-center gap-3 text-sm text-slate-600">
-          <svg class="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
-          </svg>
-          <span id="progressText">Enviando...</span>
-        </div>
+    </section>
+
+    <section id="filaCard" class="hidden bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-medium">Processamentos em andamento</h2>
+        <button id="limparFila" class="text-xs text-slate-500 hover:text-red-600">Limpar concluídos</button>
       </div>
+      <ul id="fila" class="space-y-2"></ul>
     </section>
 
     <section id="resultCard" class="hidden bg-white rounded-lg shadow-sm border border-slate-200 p-6">
       <div class="flex items-center justify-between mb-4">
-        <h2 class="font-medium">Resultado</h2>
+        <h2 class="font-medium">Último resultado</h2>
         <span id="scoreBadge" class="text-xs font-semibold px-2 py-1 rounded-full"></span>
       </div>
       <dl id="resultMeta" class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm mb-6"></dl>

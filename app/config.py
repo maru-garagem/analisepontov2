@@ -37,6 +37,22 @@ class Settings(BaseSettings):
     OPENROUTER_MODEL_POTENTE: str = "x-ai/grok-4"
     OPENROUTER_MODEL_BARATO: str = "x-ai/grok-4-fast"
 
+    # Modelos que o usuário pode escolher na tela de upload para o cadastro
+    # assistido. Whitelist para evitar uso de modelos arbitrários (risco de
+    # custo). Se precisar adicionar, edite esta lista.
+    @property
+    def modelos_potentes_permitidos(self) -> list[str]:
+        return [
+            "anthropic/claude-opus-4.7",
+            "anthropic/claude-sonnet-4.6",
+            "openai/gpt-5.4",
+            "openai/gpt-5.4-mini",
+            "google/gemini-3-flash-preview",
+            "deepseek/deepseek-v4-pro",
+            "x-ai/grok-4.1-fast",
+            "x-ai/grok-4-fast",
+        ]
+
     # --- Uploads ---
     MAX_UPLOAD_SIZE_MB: int = 20
 

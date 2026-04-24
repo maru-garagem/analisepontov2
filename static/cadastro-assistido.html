@@ -151,9 +151,11 @@
       <div class="flex items-center justify-between gap-3">
         <button
           @click="cancelar()"
-          class="px-4 py-2 rounded border border-slate-300 text-slate-700 hover:bg-slate-100"
+          :disabled="cancelando || enviando"
+          class="px-4 py-2 rounded border border-slate-300 text-slate-700 hover:bg-slate-100 disabled:opacity-50"
         >
-          Cancelar
+          <span x-show="!cancelando">Cancelar</span>
+          <span x-show="cancelando">Cancelando...</span>
         </button>
         <div class="flex items-center gap-3">
           <span x-show="confianca !== null" class="text-xs text-slate-500">
@@ -162,9 +164,14 @@
           <button
             @click="confirmar()"
             :disabled="!podeConfirmar"
-            class="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50"
+            class="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50 flex items-center gap-2"
           >
-            Confirmar e salvar esqueleto
+            <svg x-show="enviando" class="animate-spin h-4 w-4" viewBox="0 0 24 24">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" opacity="0.25"/>
+              <path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="3" fill="none"/>
+            </svg>
+            <span x-show="!enviando">Confirmar e salvar esqueleto</span>
+            <span x-show="enviando">Salvando e extraindo...</span>
           </button>
         </div>
       </div>

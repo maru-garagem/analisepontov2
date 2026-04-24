@@ -227,8 +227,10 @@ def _fluxo_rapido(db: Session, processamento_id, pdf_bytes, ident, inicio) -> No
 
 
 def _fluxo_cadastro_assistido(db: Session, processamento_id, pdf_bytes, ident, inicio) -> None:
+    # Modelo escolhido pelo usuário no upload (whitelistado pelo route).
+    modelo = storage.get_metadata(str(processamento_id)).get("modelo_potente")
     try:
-        proposta = gerar_proposta(pdf_bytes)
+        proposta = gerar_proposta(pdf_bytes, modelo=modelo)
     except NotACardPontoError:
         _atualizar(
             db, processamento_id,

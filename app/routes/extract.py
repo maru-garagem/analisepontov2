@@ -76,6 +76,7 @@ def iniciar_extracao(
     file: UploadFile = File(...),
     id_processo: str | None = Form(default=None),
     id_documento: str | None = Form(default=None),
+    modelo_potente: str | None = Form(default=None),
     auth: dict = Depends(require_auth),
 ) -> ExtractStartResponse:
     settings = get_settings()
@@ -86,6 +87,12 @@ def iniciar_extracao(
             status_code=429,
             detail="Limite de uploads atingido. Aguarde e tente novamente.",
         )
+
+    # Modelo só é efetivo se cair em cadastro assistido. Valida whitelist;
+    # modelo fora da lista vira None (default do servidor).
+    modelo_validado: str | None = None
+    if modelo_potente and modelo_potente in settings.modelos_potentes_permitidos:
+        modelo_validado = modelo_potente
 
     # Valida content-type e tamanho
     if file.content_type not in ("application/pdf", "application/octet-stream", None):
@@ -130,12 +137,28 @@ def iniciar_extracao(
 
     # Guarda bytes em memória e lança background task
     storage.put_pdf(str(proc_id), pdf_bytes, file.filename or "arquivo.pdf")
+    if modelo_validado:
+        storage.put_metadata(str(proc_id), {"modelo_potente": modelo_validado})
     background_tasks.add_task(processar_em_background, proc_id)
 
     return ExtractStartResponse(
         processing_id=str(proc_id),
         status=StatusProcessamento.EM_PROCESSAMENTO.value,
     )
+
+
+@router.get("/modelos-disponiveis")
+def modelos_disponiveis(auth: dict = Depends(require_auth)) -> dict[str, Any]:
+    """
+    Retorna a whitelist de modelos potentes que o usuário pode escolher
+    no dropdown da tela de upload. Frontend popula o <select> a partir
+    daqui para não hardcodar a lista em 2 lugares.
+    """
+    settings = get_settings()
+    return {
+        "modelos": settings.modelos_potentes_permitidos,
+        "padrao": settings.OPENROUTER_MODEL_POTENTE,
+    }
 
 
 @router.get("/{processing_id}/status", response_model=ExtractStatusResponse)
