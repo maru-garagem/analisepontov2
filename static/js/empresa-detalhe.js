@@ -150,13 +150,11 @@
     const novo = prompt('Novo nome da empresa:', atual);
     if (!novo || novo.trim() === atual) return;
     try {
-      await App.apiPostJson('/api/empresas/' + empresaId, { nome: novo.trim() }).catch(
-        () => App.apiJson('/api/empresas/' + empresaId, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ nome: novo.trim() }),
-        })
-      );
+      await App.apiJson('/api/empresas/' + empresaId, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nome: novo.trim() }),
+      });
     } catch (err) {
       App.toast('Erro: ' + err.message, 'error');
       return;
