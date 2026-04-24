@@ -83,21 +83,39 @@ function cadastroApp() {
     },
 
     async carregarPDF() {
-      // Aguarda pdfjsLib do ESM module
+      // Aguarda pdfjsLib do ESM module (pode levar ~1s pra carregar CDN)
       let tentativas = 0;
-      while (!window.pdfjsLib && tentativas < 20) {
+      while (!window.pdfjsLib && tentativas < 40) {
         await new Promise((r) => setTimeout(r, 100));
         tentativas++;
       }
-      if (!window.pdfjsLib) throw new Error('PDF.js não carregou.');
+      if (!window.pdfjsLib) {
+        throw new Error(
+          'PDF.js não carregou — CDN bloqueada? Veja o Console (F12) para detalhes.'
+        );
+      }
+      console.log('[cadastro] PDF.js carregado, buscando bytes do PDF...');
 
       const resp = await fetch(`/api/extract/${this.processingId}/pdf`, {
         credentials: 'same-origin',
       });
-      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      if (!resp.ok) {
+        if (resp.status === 404) {
+          throw new Error('PDF expirou (TTL 1h). Reenvie o arquivo.');
+        }
+        throw new Error('HTTP ' + resp.status + ' ao baixar PDF.');
+      }
       const buf = await resp.arrayBuffer();
-      this.pdfDoc = await window.pdfjsLib.getDocument({ data: buf }).promise;
+      console.log('[cadastro] bytes recebidos:', buf.byteLength);
+
+      try {
+        this.pdfDoc = await window.pdfjsLib.getDocument({ data: buf }).promise;
+      } catch (err) {
+        console.error('[cadastro] erro do PDF.js:', err);
+        throw new Error('PDF.js falhou ao parsear: ' + (err.message || err));
+      }
       this.totalPaginas = this.pdfDoc.numPages;
+      console.log('[cadastro] PDF com', this.totalPaginas, 'página(s)');
       await this.renderizarPagina(1);
     },
 

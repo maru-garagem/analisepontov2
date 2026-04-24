@@ -62,7 +62,8 @@ _CSP = (
     "img-src 'self' data: blob:; "
     "font-src 'self' data:; "
     "connect-src 'self' https://cdn.jsdelivr.net; "
-    "worker-src 'self' blob:; "
+    "worker-src 'self' blob: https://cdn.jsdelivr.net; "
+    "child-src 'self' blob:; "
     "frame-ancestors 'none';"
 )
 
