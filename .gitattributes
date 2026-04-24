@@ -1,0 +1,8 @@
+# Normaliza line endings para LF em arquivos que rodam em Linux.
+* text=auto eol=lf
+
+# Binários
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ico binary
