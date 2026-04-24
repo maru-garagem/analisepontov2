@@ -16,6 +16,9 @@ function cadastroApp() {
     erroEstrutura: null,
     enviando: false,   // bloqueio de clique duplo
     cancelando: false,
+    modelosBaratos: [],
+    modeloBaratoPadrao: '',
+    modeloFallback: '',   // o que o usuário escolher vai pra estrutura.modelo_fallback
     form: {
       nome_empresa: '',
       cnpjs: [],
@@ -38,6 +41,15 @@ function cadastroApp() {
         App.toast('ID de processamento ausente.', 'error');
         location.href = '/';
         return;
+      }
+
+      // Catálogo de modelos baratos para o dropdown
+      try {
+        const catalogo = await App.apiJson('/api/extract/modelos-disponiveis');
+        this.modelosBaratos = catalogo.modelos_baratos || [];
+        this.modeloBaratoPadrao = catalogo.padrao_barato || '';
+      } catch {
+        // falha silenciosa — dropdown fica só com "Padrão do servidor"
       }
 
       // Carrega proposta
@@ -64,6 +76,11 @@ function cadastroApp() {
       this.amostra = proposta.amostra_linhas || [];
       this.colunasAmostra = this.amostra.length > 0 ? Object.keys(this.amostra[0]) : [];
       this.confianca = proposta.confianca ?? null;
+      // Se a proposta já traz um modelo_fallback (ex: veio de um esqueleto
+      // anterior), pré-seleciona no dropdown.
+      if (proposta.estrutura && proposta.estrutura.modelo_fallback) {
+        this.modeloFallback = proposta.estrutura.modelo_fallback;
+      }
       this.estruturaTexto = JSON.stringify(proposta.estrutura || {}, null, 2);
 
       // Valida JSON em tempo real
@@ -127,6 +144,15 @@ function cadastroApp() {
       // Feedback imediato — desabilita botões antes do request.
       this.enviando = true;
       App.toast('Salvando esqueleto e extraindo...', 'info');
+
+      // Injeta a escolha de modelo fallback na estrutura antes de enviar.
+      // Se o usuário deixou "Padrão do servidor", remove a chave para o
+      // backend cair no OPENROUTER_MODEL_BARATO.
+      if (this.modeloFallback) {
+        estrutura.modelo_fallback = this.modeloFallback;
+      } else {
+        delete estrutura.modelo_fallback;
+      }
 
       const payload = {
         nome_empresa: this.form.nome_empresa || this.empresa_candidata_nome || 'Empresa',

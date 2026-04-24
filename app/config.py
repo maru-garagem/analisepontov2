@@ -62,9 +62,28 @@ class Settings(BaseSettings):
         for m in self.modelos_potentes_catalogo:
             if m["id"] == modelo:
                 return bool(m["suporta_visao"])
+        for m in self.modelos_baratos_catalogo:
+            if m["id"] == modelo:
+                return bool(m["suporta_visao"])
         # Modelo fora do catálogo (usando default do env): assume que suporta
         # visão — os defaults padrão (Grok-4, GPT-4o) historicamente suportam.
         return True
+
+    # Modelos baratos oferecidos no cadastro para o fallback IA em futuras
+    # extrações (quando plumber/OCR não conseguem extrair todas as linhas).
+    # Escolhidos por oferecerem bom custo-benefício.
+    @property
+    def modelos_baratos_catalogo(self) -> list[dict[str, object]]:
+        return [
+            {"id": "x-ai/grok-4.1-fast", "suporta_visao": False},
+            {"id": "x-ai/grok-4-fast", "suporta_visao": False},
+            {"id": "deepseek/deepseek-v4-pro", "suporta_visao": False},
+            {"id": "google/gemini-3-flash-preview", "suporta_visao": True},
+        ]
+
+    @property
+    def modelos_baratos_permitidos(self) -> list[str]:
+        return [m["id"] for m in self.modelos_baratos_catalogo]
 
     # --- Uploads ---
     MAX_UPLOAD_SIZE_MB: int = 20

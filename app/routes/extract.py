@@ -150,13 +150,17 @@ def iniciar_extracao(
 @router.get("/modelos-disponiveis")
 def modelos_disponiveis(auth: dict = Depends(require_auth)) -> dict[str, Any]:
     """
-    Retorna o catálogo de modelos potentes (id + suporta_visao) para o
-    frontend popular o dropdown sem hardcodar 2 vezes.
+    Retorna catálogos de modelos:
+      - `modelos` (potentes): usados no cadastro assistido (Vision).
+      - `modelos_baratos`: usados no fallback IA em extrações futuras; salvos
+        no esqueleto (estrutura.modelo_fallback) na hora da confirmação.
     """
     settings = get_settings()
     return {
         "modelos": settings.modelos_potentes_catalogo,
         "padrao": settings.OPENROUTER_MODEL_POTENTE,
+        "modelos_baratos": settings.modelos_baratos_catalogo,
+        "padrao_barato": settings.OPENROUTER_MODEL_BARATO,
     }
 
 

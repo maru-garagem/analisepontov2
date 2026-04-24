@@ -65,6 +65,9 @@ MetodoPreferencial = Literal["plumber_direto", "ocr_guiado", "ia_barata_com_exem
 
 class EstruturaEsqueleto(BaseModel):
     metodo_preferencial: MetodoPreferencial = "plumber_direto"
+    # Modelo barato usado quando cai no fallback IA (plumber/OCR falham).
+    # Se None, usa o default das settings (OPENROUTER_MODEL_BARATO).
+    modelo_fallback: str | None = None
     cabecalho: dict[str, RegraCabecalho] = Field(default_factory=dict)
     tabela: TabelaSpec = Field(default_factory=TabelaSpec)
     parsing: ParsingSpec = Field(default_factory=ParsingSpec)

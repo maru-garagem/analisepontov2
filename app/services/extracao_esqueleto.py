@@ -26,7 +26,8 @@ from app.services.identificacao import extrair_cnpjs, formatar_cnpj
 from app.services.llm import get_llm_client
 from app.config import get_settings
 from app.utils.errors import LLMUnavailableError, PontoExtractError
-from app.utils.pdf import abrir_pdf, extrair_texto_todo
+from app.utils.ocr import ocr_tabela_por_bbox, ocr_todo
+from app.utils.pdf import abrir_pdf, extrair_texto_todo, parece_pdf_escaneado
 
 logger = logging.getLogger(__name__)
 
@@ -208,27 +209,98 @@ def _plumber_direto(
     return {"cabecalho": cabecalho, "linhas": linhas}
 
 
+def _ocr_guiado(
+    pdf_bytes: bytes, estrutura: dict[str, Any], avisos: list[str]
+) -> dict[str, Any]:
+    """
+    OCR + aplicação das regras do esqueleto. Usado para PDFs escaneados
+    (sem texto digital extraível pelo pdfplumber).
+
+    Cabeçalho: regex contra o texto OCRizado completo.
+    Tabela: reconstrução via bounding boxes do Tesseract (ocr_tabela_por_bbox).
+    """
+    # Cabeçalho usa texto livre do OCR (concatenado).
+    textos_ocr = ocr_todo(pdf_bytes)
+    texto_completo = "\n".join(textos_ocr)
+
+    cabecalho: dict[str, Any] = {}
+    for campo, regra in (estrutura.get("cabecalho") or {}).items():
+        cabecalho[campo] = extrair_campo_cabecalho(texto_completo, regra)
+
+    # Tabela via bounding boxes.
+    tabela_spec = estrutura.get("tabela") or {}
+    colunas = tabela_spec.get("colunas") or []
+    parsing = estrutura.get("parsing") or {}
+    descartar = tabela_spec.get("linhas_descartar_regex") or []
+    header_regex = tabela_spec.get("header_row_regex")
+    num_esperado = tabela_spec.get("num_colunas_esperado")
+
+    linhas: list[dict[str, Any]] = []
+    paginas_linhas = ocr_tabela_por_bbox(pdf_bytes)
+
+    for linhas_pagina in paginas_linhas:
+        for linha_bruta in linhas_pagina:
+            if not linha_bruta:
+                continue
+            if eh_linha_header(linha_bruta, header_regex):
+                continue
+            if eh_linha_descartavel(linha_bruta, descartar):
+                continue
+            if num_esperado and len(linha_bruta) < max(2, num_esperado // 2):
+                # Linha muito fragmentada ou texto solto — ignora (evita
+                # poluir resultado com linhas de "assinatura", rodapé, etc.)
+                continue
+            if num_esperado and len(linha_bruta) < num_esperado:
+                avisos.append(
+                    f"ocr_linha_com_{len(linha_bruta)}_colunas (esperado {num_esperado})"
+                )
+            linhas.append(processar_linha(linha_bruta, colunas, parsing))
+
+    return {"cabecalho": cabecalho, "linhas": linhas}
+
+
 def _ia_barata_com_exemplos(
     pdf_bytes: bytes,
     estrutura: dict[str, Any],
     exemplos: list[dict[str, Any]],
     avisos: list[str],
+    texto_override: str | None = None,
 ) -> dict[str, Any]:
     """
     Fallback usando LLM barato com few-shot dos exemplos validados.
-    Envia o texto do PDF (não a imagem) para ser econômico.
+    Envia apenas texto (não imagem) para ser econômico. Se o PDF não tiver
+    texto digital, `texto_override` pode ser passado (p.ex. resultado do OCR).
+
+    O modelo usado é `estrutura.modelo_fallback` se definido, senão o default
+    das settings (OPENROUTER_MODEL_BARATO).
     """
-    textos = extrair_texto_todo(pdf_bytes)
-    texto_pdf = "\n".join(textos).strip()
+    if texto_override is not None:
+        texto_pdf = texto_override.strip()
+    else:
+        textos = extrair_texto_todo(pdf_bytes)
+        texto_pdf = "\n".join(textos).strip()
 
     if not texto_pdf:
-        # PDF escaneado sem texto extraível. Fora do escopo de IA barata por texto.
+        # Tenta OCR como último recurso pra ter texto.
+        try:
+            textos_ocr = ocr_todo(pdf_bytes)
+            texto_pdf = "\n".join(textos_ocr).strip()
+        except Exception:
+            texto_pdf = ""
+
+    if not texto_pdf:
         avisos.append("pdf_sem_texto_extraivel")
         raise PontoExtractError(
-            "PDF sem texto extraível — é necessário cadastro assistido com visão."
+            "PDF sem texto extraível nem por pdfplumber nem por OCR."
         )
 
     settings = get_settings()
+    modelo_custom = estrutura.get("modelo_fallback")
+    if modelo_custom and modelo_custom in settings.modelos_baratos_permitidos:
+        modelo_efetivo = modelo_custom
+    else:
+        modelo_efetivo = settings.OPENROUTER_MODEL_BARATO
+
     exemplos_txt = "\n\n".join(
         f"### Exemplo {i+1}\nTrecho:\n{e.get('trecho_pdf','')}\n\nSaída:\n{e.get('saida_esperada')}"
         for i, e in enumerate(exemplos[:3])  # máx 3 exemplos few-shot
@@ -249,7 +321,7 @@ def _ia_barata_com_exemplos(
     client = get_llm_client()
     try:
         resultado = client.chat_json(
-            model=settings.OPENROUTER_MODEL_BARATO,
+            model=modelo_efetivo,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -276,45 +348,75 @@ def aplicar_esqueleto(
     esqueleto: Esqueleto,
     *,
     permitir_fallback_llm: bool = True,
+    permitir_fallback_ocr: bool = True,
 ) -> ResultadoExtracao:
     """
-    Aplica o esqueleto. Usa o método preferencial; se falhar (ou retornar 0
-    linhas e permitir_fallback_llm=True), cai em ia_barata_com_exemplos.
+    Aplica o esqueleto em cascata:
+      1. Método preferencial do esqueleto (plumber_direto / ocr_guiado /
+         ia_barata_com_exemplos).
+      2. Se retornou 0 linhas e o PDF parece escaneado → OCR guiado.
+      3. Se ainda 0 linhas e há exemplos_validados → IA barata.
+
+    Flags permitem desligar cada fallback individualmente (testes).
     """
     inicio = time.monotonic()
     avisos: list[str] = []
     estrutura = dict(esqueleto.estrutura or {})
     exemplos = list(esqueleto.exemplos_validados or [])
 
-    # Valida estrutura — não raise, só normaliza (permissive pra esqueletos legados).
     try:
         EstruturaEsqueleto.model_validate(estrutura)
     except Exception as exc:
         avisos.append(f"estrutura_nao_conforme: {exc}")
 
-    metodo_preferencial = estrutura.get("metodo_preferencial", MetodoExtracao.ESQUELETO_PLUMBER.value)
-    metodo_efetivo: str
+    metodo_preferencial = estrutura.get(
+        "metodo_preferencial", MetodoExtracao.ESQUELETO_PLUMBER.value
+    )
 
-    # Tentativa principal
+    # --- Tentativa principal ---
     if metodo_preferencial in (MetodoExtracao.ESQUELETO_PLUMBER.value, "plumber_direto"):
         dados = _plumber_direto(pdf_bytes, estrutura, avisos)
         metodo_efetivo = MetodoExtracao.ESQUELETO_PLUMBER.value
+    elif metodo_preferencial in (MetodoExtracao.ESQUELETO_OCR.value, "ocr_guiado"):
+        dados = _ocr_guiado(pdf_bytes, estrutura, avisos)
+        metodo_efetivo = MetodoExtracao.ESQUELETO_OCR.value
     elif metodo_preferencial in (MetodoExtracao.ESQUELETO_IA_BARATA.value, "ia_barata_com_exemplos"):
         dados = _ia_barata_com_exemplos(pdf_bytes, estrutura, exemplos, avisos)
         metodo_efetivo = MetodoExtracao.ESQUELETO_IA_BARATA.value
     else:
         raise PontoExtractError(f"Método '{metodo_preferencial}' não suportado.")
 
-    # Fallback automático
+    # --- Cascata 1: plumber sem linhas e PDF escaneado → OCR ---
+    if (
+        permitir_fallback_ocr
+        and not dados.get("linhas")
+        and metodo_efetivo == MetodoExtracao.ESQUELETO_PLUMBER.value
+        and parece_pdf_escaneado(pdf_bytes)
+    ):
+        logger.info("fallback_ocr_guiado esqueleto_id=%s", esqueleto.id)
+        avisos.append("plumber_vazio_tentando_ocr")
+        dados = _ocr_guiado(pdf_bytes, estrutura, avisos)
+        metodo_efetivo = MetodoExtracao.ESQUELETO_OCR.value
+
+    # --- Cascata 2: se ainda vazio e há exemplos → IA barata ---
     if (
         permitir_fallback_llm
         and not dados.get("linhas")
-        and metodo_efetivo == MetodoExtracao.ESQUELETO_PLUMBER.value
+        and metodo_efetivo != MetodoExtracao.ESQUELETO_IA_BARATA.value
         and exemplos
     ):
         logger.info("fallback_ia_barata esqueleto_id=%s", esqueleto.id)
-        avisos.append("plumber_sem_linhas_tentando_ia_barata")
-        dados = _ia_barata_com_exemplos(pdf_bytes, estrutura, exemplos, avisos)
+        avisos.append(f"{metodo_efetivo}_vazio_tentando_ia_barata")
+        # Se já OCRizamos, reusa o texto pra evitar OCR duplicado.
+        texto_override = None
+        if metodo_efetivo == MetodoExtracao.ESQUELETO_OCR.value:
+            try:
+                texto_override = "\n".join(ocr_todo(pdf_bytes))
+            except Exception:
+                texto_override = None
+        dados = _ia_barata_com_exemplos(
+            pdf_bytes, estrutura, exemplos, avisos, texto_override=texto_override
+        )
         metodo_efetivo = MetodoExtracao.ESQUELETO_IA_BARATA.value
 
     tempo_ms = int((time.monotonic() - inicio) * 1000)
