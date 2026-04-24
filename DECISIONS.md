@@ -52,6 +52,41 @@ Design detalhado: **Fase 4**.
 
 ---
 
+## Fluxo assíncrono com polling
+
+`POST /api/extract` retorna **imediatamente** um `processing_id` e dispara `BackgroundTask`. O frontend faz polling em `GET /api/extract/{id}/status` (intervalo inicial 1.5s) até atingir estado final (`sucesso`, `sucesso_com_aviso`, `aguardando_cadastro`, `nao_cartao_ponto`, `falhou`).
+
+Estado intermediário `aguardando_cadastro` redireciona o frontend para a tela de cadastro assistido, que consome `GET /cadastro-proposta` e confirma via `POST /cadastro-confirmar`.
+
+## Score de conformidade
+
+Combinação ponderada:
+- **30%** — fração de campos de cabeçalho preenchidos.
+- **30%** — presença de linhas na tabela (0 ou 1).
+- **40%** — fração de células `hora`/`data` que parseiam corretamente.
+- Menos penalidade por avisos (até −0.2).
+
+Limiares por env var: `SCORE_CONFORMIDADE_MIN` (default 0.85) marca como `sucesso`; abaixo disso vira `sucesso_com_aviso`. `TAXA_SUCESSO_MIN_ESQUELETO` (default 0.70) marca esqueleto como `em_revisao` — só a partir de 5 extrações no histórico, pra evitar flagar esqueletos recém-criados.
+
+## Webhooks
+
+`/api/extract-api` aceita `webhook_url` no form (ou usa `DEFAULT_WEBHOOK_URL`). Ao concluir, dispara POST com:
+- Payload completo (resultado, metadata, score)
+- Header `X-PontoExtract-Signature: sha256=<hmac>` onde o HMAC usa `SESSION_SECRET` como chave
+- Retries com backoff 1s/2s/4s em erros 5xx ou de rede; 4xx não são retriados
+
+## Segurança
+
+- **Cookies de sessão**: HMAC via `itsdangerous`, TTL 8h, `httponly`, `samesite=lax`, `secure` em produção.
+- **Rate limit**: 5 tentativas de login em 15 min por IP. Memória local (não distribuído).
+- **Security headers** em todas as respostas: CSP (permite CDNs que usamos), X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy strict-origin-when-cross-origin, Permissions-Policy fechado, HSTS em produção.
+- **Exception handler central**: `PontoExtractError` → JSON com `{detail, code}` e status HTTP apropriado.
+- **LGPD**: `DELETE /api/history/{id}` para retenção; apagar Processamento não apaga Empresa/Esqueleto (metadados de layout, não dados pessoais).
+
 ## Histórico de atualizações
 
-- **Fase 1 (setup):** decisões iniciais registradas acima.
+- **Fases 1-4**: decisões iniciais da stack + identificação/fingerprint.
+- **Fases 5-6**: esquema de extração via esqueleto + estrutura JSON formalizada.
+- **Fases 7-8**: cadastro assistido com Vision + UI com PDF.js + Alpine.
+- **Fases 9-11**: score refinado, drift, endpoints de gestão, webhooks.
+- **Fase 12**: security headers, exception handler central, endpoint LGPD de deleção.

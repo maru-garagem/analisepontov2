@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.routes import auth, empresas, esqueletos, extract, health, history
+from app.utils.errors import PontoExtractError
 from app.utils.security import SESSION_COOKIE_NAME, verify_session_token
 
 settings = get_settings()
@@ -46,6 +47,26 @@ _PUBLIC_API_PATHS = {"/api/health"}
 _PUBLIC_API_PREFIXES = ("/api/auth/",)
 
 
+@app.exception_handler(PontoExtractError)
+async def _handle_domain_error(_: Request, exc: PontoExtractError):
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={"detail": str(exc) or exc.code, "code": exc.code},
+    )
+
+
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+    "img-src 'self' data: blob:; "
+    "font-src 'self' data:; "
+    "connect-src 'self' https://cdn.jsdelivr.net; "
+    "worker-src 'self' blob:; "
+    "frame-ancestors 'none';"
+)
+
+
 @app.middleware("http")
 async def auth_gate(request: Request, call_next):
     """
@@ -66,6 +87,25 @@ async def auth_gate(request: Request, call_next):
         status_code=401,
         content={"detail": "Não autenticado."},
     )
+
+
+# Registrado DEPOIS do auth_gate para ficar no topo do stack (outer) —
+# garante que 401s e erros também recebam os security headers.
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault(
+        "Permissions-Policy", "camera=(), microphone=(), geolocation=()"
+    )
+    response.headers.setdefault("Content-Security-Policy", _CSP)
+    if settings.is_prod:
+        response.headers.setdefault(
+            "Strict-Transport-Security", "max-age=63072000; includeSubDomains"
+        )
+    return response
 
 
 app.include_router(health.router, prefix="/api")

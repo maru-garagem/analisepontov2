@@ -79,6 +79,25 @@ def list_history(
     return HistoryListResponse(itens=itens, total=total, limit=limit, offset=offset)
 
 
+@router.delete("/{processamento_id}")
+def delete_history_item(
+    processamento_id: str,
+    auth: dict = Depends(require_auth),
+    db: Session = Depends(get_db),
+) -> dict[str, bool]:
+    """
+    Remove um processamento (LGPD / retenção). Apagar um processamento
+    NÃO apaga a empresa nem o esqueleto associados — esses são metadados
+    de identificação do layout, não dados pessoais.
+    """
+    p = db.get(Processamento, _parse_uuid(processamento_id))
+    if p is None:
+        raise HTTPException(status_code=404, detail="Processamento não encontrado.")
+    db.delete(p)
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/{processamento_id}", response_model=HistoryDetailResponse)
 def get_history_item(
     processamento_id: str,
