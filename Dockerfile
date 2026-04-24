@@ -21,7 +21,10 @@ RUN pip install -r requirements.txt
 
 COPY . .
 
+RUN chmod +x /app/entrypoint.sh
+
 EXPOSE 8000
 
-# Alembic roda antes de subir a app, garantindo que o schema está atualizado.
-CMD ["sh", "-c", "alembic upgrade head && uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# entrypoint.sh loga cada passo (migration, import, uvicorn) para facilitar
+# diagnosticar crashes silenciosos no container.
+CMD ["/app/entrypoint.sh"]
