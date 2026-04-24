@@ -1,11 +1,20 @@
 """
-Score de conformidade de uma extração + atualização de métricas do esqueleto
-para detecção de drift. Versão inicial implementada aqui; métricas mais
-sofisticadas vão ser refinadas na Fase 9.
+Score de conformidade de uma extração e atualização de métricas do
+esqueleto. Detecta drift automaticamente e marca esqueletos como
+`em_revisao` quando a qualidade cai de forma sustentada.
+
+O score combina três sinais:
+  1. Fração de campos de cabeçalho preenchidos (peso 30%)
+  2. Presença de linhas na tabela (peso 30%)
+  3. Qualidade das células tipadas — % de horas/datas que parseiam corretamente (peso 40%)
+
+Penalização leve por avisos acumulados durante a extração.
 """
 from __future__ import annotations
 
 import logging
+import re
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -16,39 +25,82 @@ from app.services.extracao_esqueleto import ResultadoExtracao
 
 logger = logging.getLogger(__name__)
 
+_RE_HORA = re.compile(r"^\d{1,2}:\d{2}$")
+_RE_DATA_DDMMAAAA = re.compile(r"^\d{1,2}/\d{1,2}/\d{2,4}$")
+_RE_DATA_DDMM = re.compile(r"^\d{1,2}/\d{1,2}$")
+
+# Mínimo de extrações antes de flagar um esqueleto — evita marcar como
+# em_revisao um esqueleto novinho com 1-2 chamadas ruins por acaso.
+MIN_HISTORICO_PARA_FLAG = 5
+
+
+def _celula_bem_parseada(tipo: str, valor: Any) -> bool:
+    if valor is None:
+        return True  # vazio não invalida — apenas não conta
+    s = str(valor).strip()
+    if not s:
+        return True
+    if tipo == "hora":
+        return bool(_RE_HORA.match(s))
+    if tipo == "data":
+        return bool(_RE_DATA_DDMMAAAA.match(s) or _RE_DATA_DDMM.match(s))
+    # número e texto são permissivos
+    return True
+
 
 def calcular_score(resultado: ResultadoExtracao, esqueleto: Esqueleto) -> float:
-    """
-    Score de conformidade entre 0.0 e 1.0. Heurísticas:
-      - Número de linhas extraídas vs. esperado (se conhecido).
-      - Proporção de campos de cabeçalho preenchidos.
-      - Ausência de avisos críticos.
-    """
     estrutura = esqueleto.estrutura or {}
     cabecalho_spec = estrutura.get("cabecalho") or {}
-    num_campos_cabecalho = max(1, len(cabecalho_spec))
-    preenchidos = sum(1 for v in resultado.cabecalho.values() if v)
-    frac_cabecalho = preenchidos / num_campos_cabecalho
+    tabela_spec = estrutura.get("tabela") or {}
+    colunas_spec = tabela_spec.get("colunas") or []
 
-    # Linhas: se houver exemplos_validados indicando quantidade típica, usamos
-    # o mínimo entre (linhas atuais / linhas esperadas) e 1.0. Sem exemplos,
-    # consideramos sucesso se houver pelo menos 1 linha.
-    if resultado.linhas:
-        frac_linhas = 1.0
-    else:
-        frac_linhas = 0.0
+    # 1. Cabeçalho
+    num_campos = max(1, len(cabecalho_spec))
+    preenchidos = sum(
+        1 for v in resultado.cabecalho.values() if v not in (None, "", [])
+    )
+    frac_cabecalho = preenchidos / num_campos
 
-    # Avisos penalizam levemente
-    penalidade_avisos = min(0.2, len(resultado.avisos) * 0.05)
+    # 2. Linhas: tem ou não tem
+    tem_linhas = 1.0 if resultado.linhas else 0.0
 
-    score = (0.4 * frac_cabecalho + 0.6 * frac_linhas) - penalidade_avisos
+    # 3. Qualidade de células tipadas
+    cols_tipadas = [c for c in colunas_spec if c.get("tipo") in ("hora", "data")]
+    total_celulas = 0
+    celulas_validas = 0
+    if cols_tipadas and resultado.linhas:
+        for linha in resultado.linhas:
+            for col in cols_tipadas:
+                nome = col.get("nome")
+                tipo = col.get("tipo")
+                if not nome or not tipo:
+                    continue
+                valor = linha.get(nome)
+                if valor in (None, ""):
+                    continue
+                total_celulas += 1
+                if _celula_bem_parseada(tipo, valor):
+                    celulas_validas += 1
+    frac_celulas = celulas_validas / total_celulas if total_celulas > 0 else 1.0
+
+    penalidade = min(0.2, len(resultado.avisos) * 0.05)
+
+    score = (
+        0.30 * frac_cabecalho
+        + 0.30 * tem_linhas
+        + 0.40 * frac_celulas
+        - penalidade
+    )
     return max(0.0, min(1.0, score))
 
 
-def atualizar_metricas_esqueleto(db: Session, esqueleto: Esqueleto, score: float) -> None:
+def atualizar_metricas_esqueleto(
+    db: Session, esqueleto: Esqueleto, score: float
+) -> None:
     """
-    Atualiza taxa de sucesso (média móvel simples) e total_extracoes. Se a
-    taxa cair abaixo do limite configurável, marca como em_revisao.
+    Atualiza taxa_sucesso como média cumulativa e total_extracoes. Se a
+    taxa cair abaixo do limite configurado E houver histórico mínimo,
+    marca o esqueleto como em_revisao para revisão humana.
     """
     total_antigo = esqueleto.total_extracoes or 0
     taxa_antiga = esqueleto.taxa_sucesso or 0.0
@@ -60,14 +112,26 @@ def atualizar_metricas_esqueleto(db: Session, esqueleto: Esqueleto, score: float
 
     settings = get_settings()
     if (
-        novo_total >= 5  # precisa de histórico mínimo para flagar
+        novo_total >= MIN_HISTORICO_PARA_FLAG
         and nova_taxa < settings.TAXA_SUCESSO_MIN_ESQUELETO
         and esqueleto.status == StatusEsqueleto.ATIVO.value
     ):
         logger.warning(
-            "esqueleto_em_revisao id=%s taxa=%.2f total=%d",
+            "esqueleto_em_revisao id=%s taxa=%.3f total=%d",
             esqueleto.id, nova_taxa, novo_total,
         )
         esqueleto.status = StatusEsqueleto.EM_REVISAO.value
 
     db.commit()
+
+
+def classificar_status_por_score(score: float) -> str:
+    """
+    Dado um score, devolve o status do Processamento a registrar.
+    Centralizado aqui para consistência entre fluxo rápido e cadastro.
+    """
+    from app.models.enums import StatusProcessamento
+    settings = get_settings()
+    if score >= settings.SCORE_CONFORMIDADE_MIN:
+        return StatusProcessamento.SUCESSO.value
+    return StatusProcessamento.SUCESSO_COM_AVISO.value
