@@ -2,7 +2,7 @@
 
 Extração de cartões de ponto trabalhistas brasileiros via **esqueletos aprendidos por empresa**.
 
-**Status:** em desenvolvimento — Fase 1/13 (setup base).
+**Status:** v2.0 pronto para deploy — todas as 13 fases concluídas. Ver [`DECISIONS.md`](./DECISIONS.md) para o que foi e o que **não** foi testado localmente.
 
 ## Como funciona
 
@@ -77,6 +77,17 @@ tests/                pytest
 
 PDFs reais **nunca** entram no git (`.gitignore` bloqueia `*.pdf`). Logs não contêm conteúdo de PDFs — apenas IDs e metadados. Cookies de sessão em produção usam `secure`, `httponly`, `samesite=lax`.
 
+## Rodando os testes
+
+Dentro do container Docker (ou em um venv Python 3.11):
+
+```bash
+pip install -r requirements.txt
+pytest
+```
+
+Testes cobrem: normalização e whitelist do fingerprint, validação e extração de CNPJ, parsing de células (hora/data/número), cabeçalho/linhas da tabela, score de conformidade, storage em memória, assinatura e retries de webhook, auth com TestClient, identificação com DB in-memory. O que não é testado unitariamente (pdfplumber/Tesseract/LLM real) é validado manualmente ao processar um PDF real após o deploy.
+
 ## Documentação adicional
 
-- [`DECISIONS.md`](./DECISIONS.md) — decisões técnicas explicadas.
+- [`DECISIONS.md`](./DECISIONS.md) — decisões técnicas, pendências e próximas melhorias.

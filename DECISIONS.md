@@ -83,6 +83,45 @@ Limiares por env var: `SCORE_CONFORMIDADE_MIN` (default 0.85) marca como `sucess
 - **Exception handler central**: `PontoExtractError` → JSON com `{detail, code}` e status HTTP apropriado.
 - **LGPD**: `DELETE /api/history/{id}` para retenção; apagar Processamento não apaga Empresa/Esqueleto (metadados de layout, não dados pessoais).
 
+## O que NÃO foi testado localmente (honesto)
+
+A máquina de desenvolvimento tem Python 3.14, sem Docker e sem wheels de `pydantic-core` para a versão 3.14. O trabalho foi feito e validado com:
+- `python -m py_compile` em todos os arquivos `.py` criados ou modificados.
+- Validação estática de configs (TOML, YAML, Dockerfile, .env.example).
+- Design review de cada módulo.
+
+**Não rodei**:
+- `docker-compose up` de ponta a ponta. Primeira subida real é responsabilidade do operador.
+- `alembic upgrade head` contra Postgres real. Deve rodar limpo (migration manualmente testada em sintaxe), mas pode revelar algum detalhe de tipo.
+- `pytest` — os testes são válidos sintaticamente e logicamente, mas não foram executados nesta máquina. Rodar `pytest` no ambiente Docker (Python 3.11) é o próximo passo.
+- Chamadas reais à OpenRouter / Tesseract / pdf2image / Poppler. O pipeline está estruturalmente completo; o primeiro upload com PDF real vai confirmar se prompts, parsing e OCR funcionam como projetado.
+- Frontend renderizado no browser. PDF.js via ESM e Alpine via CDN foram escolhidos por serem estáveis, mas o layout da tela de cadastro assistido merece tuning ao ver um PDF real dentro.
+
+## Pendências para a primeira revisão pós-deploy
+
+1. Criar um diretório `tests/fixtures/pdfs/` com 1 ou 2 PDFs **sintéticos** (gerados por fpdf2) nomeados `synthetic_*.pdf` — o `.gitignore` permite esses por exceção.
+2. Rodar o fluxo completo manualmente com um PDF real (os "verde - *.pdf" que você colocou na raiz) e ajustar:
+   - Qualidade da proposta do LLM potente (prompt em `services/cadastro_assistido.py`).
+   - Regex padrão de CNPJ/labels para os layouts reais.
+   - Presença/ausência de tabelas quando pdfplumber varia.
+3. Confirmar que o custo estimado do cadastro assistido (`_custo_estimado` em `services/cadastro_assistido.py`) bate com a tabela real do OpenRouter na data.
+4. Revisar se o token TTL do cookie (8h) atende a expectativa de uso do operador.
+
+## Próximas melhorias (v2.1+)
+
+Fora do escopo desta v2.0, mas valem planejamento:
+
+- **Overlays visuais** (caixinhas coloridas sobre o PDF no cadastro). Alta complexidade, alto valor de UX.
+- **Multi-usuário** com emails individuais e permissões (admin vs operador).
+- **Rate limit distribuído** via Redis (hoje é memória local — se escalar para múltiplas réplicas, cada processo tem seu contador).
+- **Versionamento de esqueletos com rollback**: hoje nova versão desativa a anterior; poderia permitir voltar.
+- **UI de edição campo-a-campo da estrutura**: hoje o usuário edita JSON no textarea; formulário guiado seria mais acessível.
+- **Fallback automático plumber → OCR guiado**: hoje só existe fallback para IA barata. Para PDFs escaneados sem exemplos, OCR guiado direto no esqueleto seria mais barato.
+- **Dashboard de métricas**: taxa de acerto por esqueleto ao longo do tempo, custo acumulado, volume por empresa.
+- **Agrupamento por "empresa matriz"**: quando várias empresas compartilham fingerprint, sugerir vinculação.
+- **Retenção automática**: cron que apaga processamentos mais antigos que N dias (configurável).
+- **Exportação**: download do histórico filtrado em CSV/Excel.
+
 ## Histórico de atualizações
 
 - **Fases 1-4**: decisões iniciais da stack + identificação/fingerprint.
@@ -90,3 +129,4 @@ Limiares por env var: `SCORE_CONFORMIDADE_MIN` (default 0.85) marca como `sucess
 - **Fases 7-8**: cadastro assistido com Vision + UI com PDF.js + Alpine.
 - **Fases 9-11**: score refinado, drift, endpoints de gestão, webhooks.
 - **Fase 12**: security headers, exception handler central, endpoint LGPD de deleção.
+- **Fase 13**: testes (unitários puros + DB in-memory + mocks de webhook/LLM) + pyproject.toml.
