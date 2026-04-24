@@ -5,9 +5,12 @@ from __future__ import annotations
 
 import logging
 
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.routes import auth, extract, health
@@ -68,3 +71,9 @@ async def auth_gate(request: Request, call_next):
 app.include_router(health.router, prefix="/api")
 app.include_router(auth.router, prefix="/api")
 app.include_router(extract.router, prefix="/api")
+
+# Static files (frontend): servidos a partir de ./static. O HTML é público;
+# as APIs /api/* é que são protegidas pelo middleware acima.
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/", StaticFiles(directory=_STATIC_DIR, html=True), name="static")

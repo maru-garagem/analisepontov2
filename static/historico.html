@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Histórico — PontoExtract v2</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/js/common.js"></script>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900">
+  <header class="bg-white border-b border-slate-200">
+    <div class="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
+      <h1 class="text-xl font-semibold">PontoExtract v2</h1>
+      <nav class="flex items-center gap-4 text-sm">
+        <a href="/" class="text-slate-600 hover:text-slate-900">Extrair</a>
+        <a href="/empresas.html" class="text-slate-600 hover:text-slate-900">Empresas</a>
+        <a href="/historico.html" class="font-medium text-blue-700 hover:underline">Histórico</a>
+        <button id="logoutBtn" class="text-slate-500 hover:text-red-600">Sair</button>
+      </nav>
+    </div>
+  </header>
+  <main class="max-w-6xl mx-auto px-6 py-8">
+    <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+      <h2 class="font-medium mb-3">Processamentos recentes</h2>
+      <div id="historyList" class="text-sm text-slate-600">Carregando...</div>
+    </section>
+  </main>
+  <script src="/js/historico.js"></script>
+</body>
+</html>

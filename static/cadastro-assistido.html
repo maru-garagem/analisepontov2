@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cadastro assistido — PontoExtract v2</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.3/dist/cdn.min.js" defer></script>
+  <script src="/js/common.js"></script>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900">
+  <header class="bg-white border-b border-slate-200">
+    <div class="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
+      <h1 class="text-lg font-semibold">Cadastro assistido</h1>
+      <a href="/" class="text-sm text-slate-600 hover:text-slate-900">Voltar ao painel</a>
+    </div>
+  </header>
+
+  <main
+    x-data="cadastroApp()"
+    x-init="init()"
+    class="max-w-7xl mx-auto px-6 py-6 grid grid-cols-1 lg:grid-cols-2 gap-6"
+  >
+    <!-- ESQUERDA: PDF preview -->
+    <section class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-medium">Pré-visualização do PDF</h2>
+        <div class="text-sm text-slate-500">
+          Página <span x-text="paginaAtual"></span> / <span x-text="totalPaginas"></span>
+          <button @click="paginaAnterior()" class="ml-3 px-2 border rounded disabled:opacity-40" :disabled="paginaAtual <= 1">‹</button>
+          <button @click="proximaPagina()" class="px-2 border rounded disabled:opacity-40" :disabled="paginaAtual >= totalPaginas">›</button>
+        </div>
+      </div>
+      <div class="bg-slate-100 rounded overflow-auto" style="max-height: 80vh;">
+        <canvas id="pdfCanvas" class="block mx-auto"></canvas>
+      </div>
+    </section>
+
+    <!-- DIREITA: proposta + formulário -->
+    <section class="space-y-4">
+      <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+        <h2 class="font-medium mb-3">Empresa</h2>
+        <template x-if="empresa_candidata_nome">
+          <div class="mb-3 p-3 rounded bg-blue-50 border border-blue-200 text-sm">
+            <p>
+              Detectamos que este CNPJ já está cadastrado para
+              <strong x-text="empresa_candidata_nome"></strong>.
+            </p>
+            <label class="inline-flex items-center mt-2">
+              <input type="checkbox" x-model="usarEmpresaExistente" class="mr-2" />
+              Usar empresa existente (criar nova versão de esqueleto)
+            </label>
+          </div>
+        </template>
+
+        <label class="block text-sm mb-3">
+          <span class="text-slate-700">Nome da empresa</span>
+          <input
+            type="text"
+            x-model="form.nome_empresa"
+            :disabled="usarEmpresaExistente"
+            class="mt-1 w-full border border-slate-300 rounded px-3 py-2 disabled:bg-slate-100"
+          />
+        </label>
+
+        <div>
+          <span class="text-sm text-slate-700">CNPJs desta empresa</span>
+          <div class="mt-2 space-y-1">
+            <template x-for="(c, i) in form.cnpjs" :key="i">
+              <div class="flex items-center gap-2">
+                <input
+                  type="text"
+                  x-model="form.cnpjs[i]"
+                  class="flex-1 border border-slate-300 rounded px-2 py-1 text-sm"
+                />
+                <button @click="removerCnpj(i)" class="text-red-600 text-sm" title="Remover">×</button>
+              </div>
+            </template>
+            <button @click="adicionarCnpj()" class="text-blue-700 text-sm mt-1">+ Adicionar CNPJ</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+        <h2 class="font-medium mb-3">Amostra extraída</h2>
+        <template x-if="amostra.length === 0">
+          <p class="text-sm text-slate-500">Nenhuma linha de amostra disponível.</p>
+        </template>
+        <div class="overflow-x-auto" x-show="amostra.length > 0">
+          <table class="min-w-full text-sm">
+            <thead class="bg-slate-100">
+              <tr>
+                <template x-for="col in colunasAmostra" :key="col">
+                  <th class="px-3 py-2 text-left font-medium" x-text="col"></th>
+                </template>
+              </tr>
+            </thead>
+            <tbody>
+              <template x-for="(linha, idx) in amostra" :key="idx">
+                <tr class="border-t border-slate-200">
+                  <template x-for="col in colunasAmostra" :key="col">
+                    <td class="px-3 py-2" x-text="linha[col] ?? ''"></td>
+                  </template>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+        <p class="mt-3 text-xs text-slate-500">
+          Confira se os horários batem com o PDF. Se estiverem corretos, a estrutura abaixo também deve estar.
+        </p>
+      </div>
+
+      <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+        <h2 class="font-medium mb-3">Estrutura do esqueleto</h2>
+        <p class="text-xs text-slate-500 mb-2">
+          Proposta da IA. Edite se necessário (JSON). Será reutilizada em todas as próximas extrações desta empresa.
+        </p>
+        <textarea
+          x-model="estruturaTexto"
+          rows="14"
+          class="w-full border border-slate-300 rounded px-3 py-2 text-xs font-mono"
+        ></textarea>
+        <p class="mt-1 text-xs" :class="erroEstrutura ? 'text-red-600' : 'text-slate-400'" x-text="erroEstrutura || 'JSON válido.'"></p>
+      </div>
+
+      <div class="flex items-center justify-between gap-3">
+        <button
+          @click="cancelar()"
+          class="px-4 py-2 rounded border border-slate-300 text-slate-700 hover:bg-slate-100"
+        >
+          Cancelar
+        </button>
+        <div class="flex items-center gap-3">
+          <span x-show="confianca !== null" class="text-xs text-slate-500">
+            Confiança da IA: <span x-text="Math.round((confianca || 0) * 100) + '%'"></span>
+          </span>
+          <button
+            @click="confirmar()"
+            :disabled="!podeConfirmar"
+            class="px-4 py-2 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium disabled:opacity-50"
+          >
+            Confirmar e salvar esqueleto
+          </button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- PDF.js via CDN -->
+  <script type="module">
+    import * as pdfjsLib from 'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.min.mjs';
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.min.mjs';
+    window.pdfjsLib = pdfjsLib;
+  </script>
+
+  <script src="/js/cadastro.js"></script>
+</body>
+</html>

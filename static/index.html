@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PontoExtract v2</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="/js/common.js"></script>
+</head>
+<body class="min-h-screen bg-slate-50 text-slate-900">
+  <header class="bg-white border-b border-slate-200">
+    <div class="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+      <h1 class="text-xl font-semibold">PontoExtract v2</h1>
+      <nav class="flex items-center gap-4 text-sm">
+        <a href="/" class="font-medium text-blue-700 hover:underline">Extrair</a>
+        <a href="/empresas.html" class="text-slate-600 hover:text-slate-900">Empresas</a>
+        <a href="/historico.html" class="text-slate-600 hover:text-slate-900">Histórico</a>
+        <button id="logoutBtn" class="text-slate-500 hover:text-red-600">Sair</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-6 py-8 space-y-6">
+    <section id="uploadCard" class="bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+      <h2 class="font-medium mb-2">Enviar PDF de cartão de ponto</h2>
+      <p class="text-sm text-slate-500 mb-4">
+        O sistema detecta a empresa automaticamente. Se for nova, você será levado ao cadastro assistido.
+      </p>
+      <div
+        id="dropZone"
+        class="border-2 border-dashed border-slate-300 rounded-lg p-8 text-center cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition"
+      >
+        <p class="text-slate-600">Arraste um PDF aqui ou clique para selecionar.</p>
+        <input id="fileInput" type="file" accept="application/pdf" class="hidden" />
+      </div>
+      <div id="progress" class="hidden mt-4">
+        <div class="flex items-center gap-3 text-sm text-slate-600">
+          <svg class="animate-spin h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+          </svg>
+          <span id="progressText">Enviando...</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="resultCard" class="hidden bg-white rounded-lg shadow-sm border border-slate-200 p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-medium">Resultado</h2>
+        <span id="scoreBadge" class="text-xs font-semibold px-2 py-1 rounded-full"></span>
+      </div>
+      <dl id="resultMeta" class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm mb-6"></dl>
+      <h3 class="font-medium text-sm mb-2">Cabeçalho</h3>
+      <div id="resultHeader" class="bg-slate-50 rounded p-3 text-sm font-mono whitespace-pre overflow-x-auto mb-6"></div>
+      <h3 class="font-medium text-sm mb-2">Linhas extraídas</h3>
+      <div id="resultLines" class="overflow-x-auto"></div>
+      <div id="resultWarnings" class="mt-4"></div>
+    </section>
+  </main>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
