@@ -9,8 +9,10 @@ from sqlalchemy.orm import Session
 
 from app.deps import get_db, require_auth
 from app.models.empresa import Empresa
+from app.models.enums import StatusProcessamento
 from app.models.processamento import Processamento
 from app.schemas.history import HistoryDetailResponse, HistoryItem, HistoryListResponse
+from app.services.sweeper import cadastro_pode_ser_retomado, varrer_orfaos
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,9 @@ def list_history(
     auth: dict = Depends(require_auth),
     db: Session = Depends(get_db),
 ) -> HistoryListResponse:
+    # Limpa órfãos antes de listar — user vê estado consistente.
+    varrer_orfaos(db)
+
     q = db.query(Processamento)
     if empresa_id:
         q = q.filter(Processamento.empresa_id == _parse_uuid(empresa_id))
@@ -73,6 +78,10 @@ def list_history(
             tempo_processamento_ms=r.tempo_processamento_ms,
             id_processo=r.id_processo,
             id_documento=r.id_documento,
+            pode_retomar=(
+                r.status == StatusProcessamento.AGUARDANDO_CADASTRO.value
+                and cadastro_pode_ser_retomado(str(r.id))
+            ),
         )
         for r in rows
     ]

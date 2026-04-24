@@ -19,6 +19,9 @@ class HistoryItem(BaseModel):
     tempo_processamento_ms: int | None = None
     id_processo: str | None = None
     id_documento: str | None = None
+    # Só True para processamentos em `aguardando_cadastro` cujo PDF ainda
+    # está no storage — frontend usa para decidir entre "Retomar" e "Reenviar".
+    pode_retomar: bool = False
 
 
 class HistoryListResponse(BaseModel):

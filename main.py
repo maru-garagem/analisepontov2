@@ -116,6 +116,26 @@ app.include_router(empresas.router, prefix="/api")
 app.include_router(esqueletos.router, prefix="/api")
 app.include_router(history.router, prefix="/api")
 
+
+@app.on_event("startup")
+def _sweeper_startup() -> None:
+    """
+    Limpa órfãos ao subir: Processamentos stuck em `em_processamento` ou
+    `aguardando_cadastro` ficariam travados para sempre sem esta varredura.
+    """
+    from app.database import SessionLocal
+    from app.services.sweeper import varrer_orfaos
+
+    db = SessionLocal()
+    try:
+        n = varrer_orfaos(db)
+        if n:
+            logging.getLogger(__name__).info("startup_sweep_removeu=%d", n)
+    except Exception:
+        logging.getLogger(__name__).exception("startup_sweep_falhou")
+    finally:
+        db.close()
+
 # Static files (frontend): servidos a partir de ./static. O HTML é público;
 # as APIs /api/* é que são protegidas pelo middleware acima.
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")

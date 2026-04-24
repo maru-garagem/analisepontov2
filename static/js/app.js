@@ -5,6 +5,19 @@
 
   document.getElementById('logoutBtn').addEventListener('click', App.logout);
 
+  // Se voltamos do cadastro assistido, mostra o resultado guardado em sessionStorage.
+  const ultimoRaw = sessionStorage.getItem('ultimo_resultado');
+  if (ultimoRaw) {
+    sessionStorage.removeItem('ultimo_resultado');
+    try {
+      const ultimo = JSON.parse(ultimoRaw);
+      renderResult(ultimo);
+      App.toast('Esqueleto salvo e PDF extraído.', 'success');
+    } catch {
+      // ignora payload corrompido
+    }
+  }
+
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
   const progress = document.getElementById('progress');
