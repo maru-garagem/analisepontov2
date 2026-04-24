@@ -29,10 +29,17 @@ class _PropostaEntry:
     expires_at: float
 
 
+@dataclass
+class _MetadataEntry:
+    data: dict[str, Any]
+    expires_at: float
+
+
 class _Store:
     def __init__(self, ttl: int = DEFAULT_TTL_SECONDS) -> None:
         self._pdfs: dict[str, _PDFEntry] = {}
         self._propostas: dict[str, _PropostaEntry] = {}
+        self._metadata: dict[str, _MetadataEntry] = {}
         self._ttl = ttl
         self._lock = threading.Lock()
 
@@ -73,6 +80,24 @@ class _Store:
         with self._lock:
             self._propostas.pop(key, None)
 
+    # --- Metadata (ex: webhook_url por processamento) ---
+    def put_metadata(self, key: str, data: dict[str, Any]) -> None:
+        with self._lock:
+            self._metadata[key] = _MetadataEntry(
+                data=data,
+                expires_at=time.time() + self._ttl,
+            )
+
+    def get_metadata(self, key: str) -> dict[str, Any]:
+        self._gc()
+        with self._lock:
+            entry = self._metadata.get(key)
+            return dict(entry.data) if entry else {}
+
+    def remove_metadata(self, key: str) -> None:
+        with self._lock:
+            self._metadata.pop(key, None)
+
     # --- GC ---
     def _gc(self) -> None:
         now = time.time()
@@ -81,11 +106,14 @@ class _Store:
                 self._pdfs.pop(k, None)
             for k in [k for k, e in self._propostas.items() if e.expires_at < now]:
                 self._propostas.pop(k, None)
+            for k in [k for k, e in self._metadata.items() if e.expires_at < now]:
+                self._metadata.pop(k, None)
 
     def clear_all(self) -> None:
         with self._lock:
             self._pdfs.clear()
             self._propostas.clear()
+            self._metadata.clear()
 
 
 _store = _Store()
@@ -113,6 +141,18 @@ def get_proposta(key: str) -> dict[str, Any] | None:
 
 def remove_proposta(key: str) -> None:
     _store.remove_proposta(key)
+
+
+def put_metadata(key: str, data: dict[str, Any]) -> None:
+    _store.put_metadata(key, data)
+
+
+def get_metadata(key: str) -> dict[str, Any]:
+    return _store.get_metadata(key)
+
+
+def remove_metadata(key: str) -> None:
+    _store.remove_metadata(key)
 
 
 def clear_all_for_tests() -> None:

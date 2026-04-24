@@ -18,6 +18,7 @@ from app.models.enums import StatusEsqueleto, StatusProcessamento
 from app.models.esqueleto import Esqueleto
 from app.models.processamento import Processamento
 from app.schemas.extract import (
+    ApiExtractExternalResponse,
     CadastroConfirmarRequest,
     CadastroPropostaResponse,
     ExtractStartResponse,
@@ -334,6 +335,70 @@ def cadastro_confirmar(
         )
     finally:
         db.close()
+
+
+@router.post("-api", response_model=ApiExtractExternalResponse)
+def extract_api_externa(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    id_processo: str | None = Form(default=None),
+    id_documento: str | None = Form(default=None),
+    webhook_url: str | None = Form(default=None),
+    auth: dict = Depends(require_auth),
+) -> ApiExtractExternalResponse:
+    """
+    Endpoint para integrações externas. Faz upload + processamento em
+    background e dispara webhook quando concluir. O cliente recebe
+    `processing_id` e pode (a) aguardar o webhook ou (b) fazer polling
+    em /api/extract/{id}/status.
+    """
+    settings = get_settings()
+    pdf_bytes = file.file.read()
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    if len(pdf_bytes) > max_bytes:
+        raise HTTPException(status_code=413, detail="Arquivo grande demais.")
+
+    try:
+        validar_pdf_bytes(pdf_bytes)
+    except PDFPasswordProtectedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PDFTooLargeError as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except PDFInvalidError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    effective_webhook = webhook_url or settings.DEFAULT_WEBHOOK_URL
+    if not effective_webhook:
+        raise HTTPException(
+            status_code=400,
+            detail="webhook_url obrigatório (no form ou DEFAULT_WEBHOOK_URL).",
+        )
+
+    db = SessionLocal()
+    try:
+        proc = Processamento(
+            id=uuid.uuid4(),
+            nome_arquivo_original=file.filename or "arquivo.pdf",
+            metodo_usado="",
+            status=StatusProcessamento.EM_PROCESSAMENTO.value,
+            id_processo=id_processo,
+            id_documento=id_documento,
+            criado_por=session_id_short(auth),
+        )
+        db.add(proc)
+        db.commit()
+        proc_id = proc.id
+    finally:
+        db.close()
+
+    storage.put_pdf(str(proc_id), pdf_bytes, file.filename or "arquivo.pdf")
+    storage.put_metadata(str(proc_id), {"webhook_url": effective_webhook})
+    background_tasks.add_task(processar_em_background, proc_id)
+
+    return ApiExtractExternalResponse(
+        processing_id=str(proc_id),
+        status=StatusProcessamento.EM_PROCESSAMENTO.value,
+    )
 
 
 @router.post("/{processing_id}/cadastro-cancelar")

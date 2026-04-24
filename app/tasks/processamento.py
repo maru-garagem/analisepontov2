@@ -23,6 +23,7 @@ from app.services.cadastro_assistido import gerar_proposta
 from app.services.classificador import parece_cartao_de_ponto
 from app.services.extracao_esqueleto import aplicar_esqueleto
 from app.services.identificacao import formatar_cnpj, identificar_empresa
+from app.services.webhook import enviar_webhook
 from app.utils.errors import NotACardPontoError, PontoExtractError
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ def processar_em_background(processamento_id: uuid.UUID) -> None:
     db = SessionLocal()
     try:
         _executar_pipeline(db, processamento_id, inicio)
+        _disparar_webhook_se_configurado(db, processamento_id)
     except Exception as exc:  # pragma: no cover
         logger.exception("pipeline_crashou processamento_id=%s", processamento_id)
         try:
@@ -57,6 +59,50 @@ def processar_em_background(processamento_id: uuid.UUID) -> None:
             logger.exception("falha_ao_marcar_falha")
     finally:
         db.close()
+
+
+def _disparar_webhook_se_configurado(db: Session, processamento_id: uuid.UUID) -> None:
+    """
+    Após o pipeline, dispara webhook se tiver sido configurado para este
+    processamento (via /api/extract-api). Ignora se status ficou em
+    `aguardando_cadastro` — nesses casos o webhook dispara na confirmação.
+    """
+    meta = storage.get_metadata(str(processamento_id))
+    webhook_url = meta.get("webhook_url")
+    if not webhook_url:
+        return
+
+    proc = db.get(Processamento, processamento_id)
+    if proc is None:
+        return
+
+    # Só envia em estados finais
+    estados_finais = {
+        StatusProcessamento.SUCESSO.value,
+        StatusProcessamento.SUCESSO_COM_AVISO.value,
+        StatusProcessamento.FALHOU.value,
+        StatusProcessamento.NAO_CARTAO_PONTO.value,
+    }
+    if proc.status not in estados_finais:
+        return
+
+    payload = {
+        "processing_id": str(proc.id),
+        "status": proc.status,
+        "id_processo": proc.id_processo,
+        "id_documento": proc.id_documento,
+        "empresa_id": str(proc.empresa_id) if proc.empresa_id else None,
+        "esqueleto_id": str(proc.esqueleto_id) if proc.esqueleto_id else None,
+        "metodo_usado": proc.metodo_usado,
+        "score_conformidade": proc.score_conformidade,
+        "resultado_json": proc.resultado_json,
+        "tempo_processamento_ms": proc.tempo_processamento_ms,
+    }
+    ok, resposta = enviar_webhook(webhook_url, payload)
+    proc.webhook_enviado = ok
+    proc.webhook_resposta = (resposta or "")[:500]
+    db.commit()
+    storage.remove_metadata(str(processamento_id))
 
 
 def _executar_pipeline(db: Session, processamento_id: uuid.UUID, inicio: float) -> None:
