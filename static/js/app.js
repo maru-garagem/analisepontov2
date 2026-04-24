@@ -30,8 +30,10 @@
     } catch {}
   }
 
-  // Popula dropdown de modelo
+  // Popula dropdown de modelo + toggle de webhook
   const modeloSelect = document.getElementById('modeloSelect');
+  const webhookToggle = document.getElementById('webhookToggle');
+  const enviarWebhookCb = document.getElementById('enviarWebhook');
   try {
     const data = await App.apiJson('/api/extract/modelos-disponiveis');
     for (const m of data.modelos || []) {
@@ -42,6 +44,9 @@
       if (m.suporta_visao === false) anotacoes.push('sem visão — só PDF digital');
       opt.textContent = m.id + (anotacoes.length ? ` (${anotacoes.join(', ')})` : '');
       modeloSelect.appendChild(opt);
+    }
+    if (data.webhook_disponivel) {
+      webhookToggle.classList.remove('hidden');
     }
   } catch {}
 
@@ -197,6 +202,9 @@
     fd.append('file', file);
     const modelo = modeloSelect.value;
     if (modelo) fd.append('modelo_potente', modelo);
+    if (enviarWebhookCb && enviarWebhookCb.checked) {
+      fd.append('enviar_webhook', 'true');
+    }
 
     let start;
     try {

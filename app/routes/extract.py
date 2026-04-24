@@ -77,6 +77,7 @@ def iniciar_extracao(
     id_processo: str | None = Form(default=None),
     id_documento: str | None = Form(default=None),
     modelo_potente: str | None = Form(default=None),
+    enviar_webhook: bool = Form(default=False),
     auth: dict = Depends(require_auth),
 ) -> ExtractStartResponse:
     settings = get_settings()
@@ -137,8 +138,20 @@ def iniciar_extracao(
 
     # Guarda bytes em memória e lança background task
     storage.put_pdf(str(proc_id), pdf_bytes, file.filename or "arquivo.pdf")
+
+    # Monta metadata do processamento.
+    meta: dict[str, Any] = {}
     if modelo_validado:
-        storage.put_metadata(str(proc_id), {"modelo_potente": modelo_validado})
+        meta["modelo_potente"] = modelo_validado
+    # Webhook: se o usuário marcou opt-in E o servidor tem DEFAULT_WEBHOOK_URL,
+    # o metadata guarda a URL. Caso caia em cadastro assistido, a task NÃO
+    # dispara (só estados finais do fluxo rápido disparam).
+    if enviar_webhook and settings.DEFAULT_WEBHOOK_URL:
+        meta["webhook_url"] = settings.DEFAULT_WEBHOOK_URL
+        meta["webhook_skip_no_cadastro"] = True
+    if meta:
+        storage.put_metadata(str(proc_id), meta)
+
     background_tasks.add_task(processar_em_background, proc_id)
 
     return ExtractStartResponse(
@@ -150,10 +163,12 @@ def iniciar_extracao(
 @router.get("/modelos-disponiveis")
 def modelos_disponiveis(auth: dict = Depends(require_auth)) -> dict[str, Any]:
     """
-    Retorna catálogos de modelos:
+    Retorna catálogos de modelos e flags de configuração:
       - `modelos` (potentes): usados no cadastro assistido (Vision).
       - `modelos_baratos`: usados no fallback IA em extrações futuras; salvos
         no esqueleto (estrutura.modelo_fallback) na hora da confirmação.
+      - `webhook_disponivel`: True se DEFAULT_WEBHOOK_URL está configurado,
+        permitindo ao frontend mostrar o checkbox "Enviar para webhook".
     """
     settings = get_settings()
     return {
@@ -161,6 +176,7 @@ def modelos_disponiveis(auth: dict = Depends(require_auth)) -> dict[str, Any]:
         "padrao": settings.OPENROUTER_MODEL_POTENTE,
         "modelos_baratos": settings.modelos_baratos_catalogo,
         "padrao_barato": settings.OPENROUTER_MODEL_BARATO,
+        "webhook_disponivel": bool(settings.DEFAULT_WEBHOOK_URL),
     }
 
 
@@ -399,6 +415,7 @@ def cadastro_confirmar(
         # Limpa storage
         storage.remove_pdf(processing_id)
         storage.remove_proposta(processing_id)
+        storage.remove_metadata(processing_id)
 
         return ExtractStatusResponse(
             processing_id=processing_id,

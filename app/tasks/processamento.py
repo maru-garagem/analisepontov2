@@ -63,9 +63,14 @@ def processar_em_background(processamento_id: uuid.UUID) -> None:
 
 def _disparar_webhook_se_configurado(db: Session, processamento_id: uuid.UUID) -> None:
     """
-    Após o pipeline, dispara webhook se tiver sido configurado para este
-    processamento (via /api/extract-api). Ignora se status ficou em
-    `aguardando_cadastro` — nesses casos o webhook dispara na confirmação.
+    Dispara webhook ao fim do pipeline se configurado para este processamento.
+
+    Regras:
+    - Fluxo rápido (sucesso, sucesso_com_aviso, nao_cartao_ponto, falhou):
+      dispara se há webhook_url no metadata.
+    - Fluxo cadastro assistido (status aguardando_cadastro): NÃO dispara;
+      além disso, se `webhook_skip_no_cadastro=True` no metadata (UI),
+      remove a URL do storage para não disparar nem mesmo após confirmação.
     """
     meta = storage.get_metadata(str(processamento_id))
     webhook_url = meta.get("webhook_url")
@@ -76,7 +81,16 @@ def _disparar_webhook_se_configurado(db: Session, processamento_id: uuid.UUID) -
     if proc is None:
         return
 
-    # Só envia em estados finais
+    # Cadastro assistido: opcionalmente não dispara nunca para este upload.
+    if proc.status == StatusProcessamento.AGUARDANDO_CADASTRO.value:
+        if meta.get("webhook_skip_no_cadastro"):
+            storage.remove_metadata(str(processamento_id))
+            logger.info(
+                "webhook_removido_por_cadastro_assistido processamento_id=%s",
+                processamento_id,
+            )
+        return
+
     estados_finais = {
         StatusProcessamento.SUCESSO.value,
         StatusProcessamento.SUCESSO_COM_AVISO.value,
