@@ -31,8 +31,22 @@ class Esqueleto(Base):
         String(20), nullable=False, default=StatusEsqueleto.ATIVO.value, index=True
     )
 
-    # Assinatura visual do layout — ver services/fingerprint.py (Fase 4).
+    # Assinatura visual do layout — ver services/fingerprint.py.
+    #
+    # `fingerprint` (singular): o fingerprint "principal" — o primeiro visto
+    # no cadastro. Mantido por compat com queries existentes e como sinal de
+    # qual layout fundou esta versão.
+    #
+    # `fingerprints` (plural): conjunto de fingerprints aceitos por esta
+    # versão. Quando um PDF da mesma empresa cai em cadastro assistido com
+    # fingerprint diferente mas o operador confirma "é o mesmo layout",
+    # adicionamos aqui em vez de versionar — evita o looping de cadastros
+    # sucessivos quando a heurística do fingerprint flutua entre meses.
+    # Sempre inclui o `fingerprint` principal.
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    fingerprints: Mapped[List[str]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
 
     # Mapa semântico: cabeçalho, tabela, regras de parsing, método preferencial.
     # Estrutura detalhada documentada em DECISIONS.md + services/cadastro_assistido.py.

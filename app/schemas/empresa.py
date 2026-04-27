@@ -11,6 +11,10 @@ class EsqueletoListItem(BaseModel):
     versao: int
     status: str
     fingerprint: str
+    # Lista completa de fingerprints aceitos por esta versão (inclui o
+    # principal). UI mostra como tags na tela do esqueleto. Frontend pode
+    # comparar pelo length para sinalizar versões "consolidadas" (>1 fp).
+    fingerprints: list[str] = Field(default_factory=list)
     taxa_sucesso: float
     total_extracoes: int
     criado_em: datetime

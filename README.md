@@ -40,8 +40,10 @@ Um esqueleto é um JSON salvo no banco que contém:
 - **`metodo_preferencial`** — `plumber_direto`, `ocr_guiado` ou `ia_barata_com_exemplos`
 - **`modelo_fallback`** — modelo OpenRouter a usar se cair no fallback IA
 - **`cabecalho`** — regras para extrair cada campo (razão social, CNPJ, funcionário, matrícula, período). Cada campo é `{tipo: "ancora_regex", regex: "..."}` ou `{tipo: "regex_cnpj"}` ou `{tipo: "literal", valor: "..."}`
-- **`tabela`** — especificação da tabela de batidas: número de colunas esperado, nome e tipo de cada coluna (`data`, `hora`, `numero`, `texto`), regex de linhas a descartar (ex: linhas de total), regex da linha de cabeçalho da tabela
-- **`parsing`** — formato de hora/data, valor de célula vazia, ano default
+- **`tabela`** — especificação da tabela de batidas: número de colunas esperado, nome e tipo de cada coluna (`data`, `hora`, `numero`, `texto`), regex de linhas a descartar (ex: linhas de total), regex da linha de cabeçalho da tabela, e (opcional) `table_settings` para controlar o pdfplumber (ex: `{"vertical_strategy": "text"}`)
+- **`parsing`** — formato de hora/data, valor de célula vazia, ano default, e (opcional) `completar_data_do_periodo` (regra que combina o DIA da linha com o PERÍODO do cabeçalho — usar quando a tabela só tem o dia, não a data completa)
+
+Cada esqueleto também guarda **uma lista de fingerprints aceitos** (`fingerprints`) — assim, se um PDF da mesma empresa tiver flutuação no fingerprint (caso documentado em DECISIONS.md, decisão 2b), o operador pode anexar à versão atual em vez de criar nova versão.
 
 Exemplo mínimo:
 
@@ -454,7 +456,7 @@ Ver Swagger em `/docs` quando `ENV=development`.
 - `GET /api/auth/me` — `{authenticated: bool}`
 
 ### Extração
-- `POST /api/extract` — multipart form: `file`, opcional `modelo_potente`, `enviar_webhook`, `id_processo`, `id_documento`. Retorna `{processing_id, status}`
+- `POST /api/extract` — multipart form: `file`, opcionais `modelo_potente` (Vision para cadastro assistido), `modelo_barato` (override pontual do fallback IA — não persistente), `enviar_webhook`, `id_processo`, `id_documento`. Retorna `{processing_id, status}`
 - `GET /api/extract/{id}/status` — polling do processamento
 - `GET /api/extract/{id}/pdf` — serve o PDF (para preview no navegador)
 - `GET /api/extract/{id}/cadastro-proposta` — só quando status `aguardando_cadastro`
@@ -606,6 +608,7 @@ Requer `webhook_url` no form **ou** `DEFAULT_WEBHOOK_URL` configurado. Comportam
 {
   "processing_id": "uuid",
   "status": "sucesso",
+  "nome_arquivo": "nome-original-do-pdf.pdf",
   "id_processo": "opcional-do-cliente",
   "id_documento": "opcional-do-cliente",
   "empresa_id": "uuid|null",
@@ -618,9 +621,14 @@ Requer `webhook_url` no form **ou** `DEFAULT_WEBHOOK_URL` configurado. Comportam
     "avisos": [...],
     "score_breakdown": {...}
   },
-  "tempo_processamento_ms": 342
+  "tempo_processamento_ms": 342,
+  "criado_em": "2026-04-27T13:42:11.345678+00:00"
 }
 ```
+
+`nome_arquivo` é o nome original do PDF (como veio no upload), útil pra
+correlação manual no receptor. `id_processo` / `id_documento` são opcionais —
+vêm do form do upload e são repassados sem alteração.
 
 ### Assinatura HMAC
 

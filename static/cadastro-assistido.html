@@ -62,9 +62,59 @@
 
     <!-- DIREITA: proposta + formulário -->
     <section class="space-y-4">
+
+      <!-- Bloco "Empresa" — agora com decisão de anexar vs nova versão -->
       <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
         <h2 class="font-medium mb-3">Empresa</h2>
-        <template x-if="empresa_candidata_nome">
+
+        <!-- Match por CNPJ E há esqueleto ativo: oferece dois caminhos -->
+        <template x-if="empresa_candidata_nome && esqueletoAtivo">
+          <div class="mb-3 p-3 rounded bg-blue-50 border border-blue-200 text-sm space-y-3">
+            <p>
+              Detectamos que este CNPJ já é da empresa
+              <strong x-text="empresa_candidata_nome"></strong>,
+              cuja versão ativa é a <strong>v<span x-text="esqueletoAtivo.versao"></span></strong>
+              (já tem <span x-text="esqueletoAtivo.fingerprints_extras.length + 1"></span>
+              <span x-text="(esqueletoAtivo.fingerprints_extras.length + 1) === 1 ? 'fingerprint cadastrado' : 'fingerprints cadastrados'"></span>).
+            </p>
+
+            <p class="text-slate-700">
+              O fingerprint deste PDF é diferente do(s) já cadastrado(s) — pode ser:
+            </p>
+
+            <div class="space-y-2">
+              <label class="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-blue-100"
+                     :class="modoCadastro === 'anexar' ? 'bg-blue-100 ring-1 ring-blue-300' : ''">
+                <input type="radio" value="anexar" x-model="modoCadastro" class="mt-1" />
+                <span>
+                  <strong>É o mesmo layout</strong> — só uma flutuação no fingerprint.
+                  <br>
+                  <span class="text-xs text-slate-600">
+                    Anexa este fingerprint à v<span x-text="esqueletoAtivo.versao"></span>;
+                    sem nova versão. Use quando você olhou o PDF e ele tem o mesmo formato dos anteriores.
+                    <strong>Recomendado para a maioria dos casos.</strong>
+                  </span>
+                </span>
+              </label>
+
+              <label class="flex items-start gap-2 cursor-pointer p-2 rounded hover:bg-blue-100"
+                     :class="modoCadastro === 'nova_versao' ? 'bg-blue-100 ring-1 ring-blue-300' : ''">
+                <input type="radio" value="nova_versao" x-model="modoCadastro" class="mt-1" />
+                <span>
+                  <strong>O layout mudou</strong> — empresa trocou de sistema de ponto.
+                  <br>
+                  <span class="text-xs text-slate-600">
+                    Cria a v<span x-text="esqueletoAtivo.versao + 1"></span> e desativa a anterior.
+                    Use quando o PDF realmente tem layout diferente dos cadastrados.
+                  </span>
+                </span>
+              </label>
+            </div>
+          </div>
+        </template>
+
+        <!-- Match por CNPJ mas SEM esqueleto ativo: comportamento simples -->
+        <template x-if="empresa_candidata_nome && !esqueletoAtivo">
           <div class="mb-3 p-3 rounded bg-blue-50 border border-blue-200 text-sm">
             <p>
               Detectamos que este CNPJ já está cadastrado para
@@ -82,7 +132,7 @@
           <input
             type="text"
             x-model="form.nome_empresa"
-            :disabled="usarEmpresaExistente"
+            :disabled="usarEmpresaExistente || (esqueletoAtivo && modoCadastro)"
             class="mt-1 w-full border border-slate-300 rounded px-3 py-2 disabled:bg-slate-100"
           />
         </label>
@@ -105,6 +155,7 @@
         </div>
       </div>
 
+      <!-- Bloco "Amostra" -->
       <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
         <h2 class="font-medium mb-3">Amostra extraída</h2>
         <template x-if="amostra.length === 0">
@@ -135,6 +186,7 @@
         </p>
       </div>
 
+      <!-- Bloco "Modelo de fallback" -->
       <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
         <h2 class="font-medium mb-3">Modelo de fallback (IA barata)</h2>
         <p class="text-xs text-slate-500 mb-2">
@@ -149,10 +201,56 @@
         </select>
       </div>
 
+      <!-- Bloco NOVO "Completar data do período" — alto nível, sem JSON -->
       <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
-        <h2 class="font-medium mb-3">Estrutura do esqueleto</h2>
+        <h2 class="font-medium mb-2">Completar data por período</h2>
+        <p class="text-xs text-slate-500 mb-3">
+          Use quando a tabela tem só o DIA na linha (ex: "21", "22", "23")
+          e a data completa está no cabeçalho (ex: "Período: 21/12/2015 - 20/01/2016").
+          O sistema combina os dois automaticamente em todas as linhas.
+        </p>
+        <label class="inline-flex items-center text-sm mb-2">
+          <input type="checkbox" x-model="completarData.ativo" class="mr-2" />
+          Ativar para este esqueleto
+        </label>
+
+        <div x-show="completarData.ativo" class="grid md:grid-cols-3 gap-3 mt-2 text-sm">
+          <label class="block">
+            <span class="text-slate-700">Campo do cabeçalho</span>
+            <input type="text" x-model="completarData.campo_periodo"
+                   placeholder="ex: periodo"
+                   class="mt-1 w-full border border-slate-300 rounded px-2 py-1 text-sm" />
+            <span class="text-xs text-slate-500">Onde está o período no cabeçalho.</span>
+          </label>
+          <label class="block">
+            <span class="text-slate-700">Coluna com o dia</span>
+            <input type="text" x-model="completarData.coluna_dia"
+                   placeholder="ex: dia"
+                   class="mt-1 w-full border border-slate-300 rounded px-2 py-1 text-sm" />
+            <span class="text-xs text-slate-500">Coluna que tem só o número do dia.</span>
+          </label>
+          <label class="block">
+            <span class="text-slate-700">Coluna destino</span>
+            <input type="text" x-model="completarData.coluna_destino"
+                   placeholder="ex: data"
+                   class="mt-1 w-full border border-slate-300 rounded px-2 py-1 text-sm" />
+            <span class="text-xs text-slate-500">Onde gravar a data completa (pode sobrescrever o dia).</span>
+          </label>
+        </div>
+        <p x-show="completarData.ativo" class="text-xs text-slate-400 mt-2">
+          Detalhe avançado: a regex que casa o período no cabeçalho cobre os formatos comuns
+          ("DD/MM/AAAA - DD/MM/AAAA", "DD/MM/AAAA a DD/MM/AAAA"). Se o seu cartão usa um formato exótico,
+          ajuste no JSON da estrutura abaixo (campo <code>parsing.completar_data_do_periodo.regex_periodo</code>).
+        </p>
+      </div>
+
+      <!-- Bloco "Estrutura JSON" — para edição avançada -->
+      <div class="bg-white rounded-lg shadow-sm border border-slate-200 p-4">
+        <h2 class="font-medium mb-3">Estrutura do esqueleto (avançado)</h2>
         <p class="text-xs text-slate-500 mb-2">
-          Proposta da IA. Edite se necessário (JSON). Será reutilizada em todas as próximas extrações desta empresa.
+          Proposta da IA. Edite o JSON para ajustes finos (regex de cabeçalho,
+          tipos de coluna, settings do pdfplumber). Será reutilizada em todas
+          as próximas extrações desta empresa.
         </p>
         <textarea
           x-model="estruturaTexto"
@@ -184,7 +282,7 @@
               <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" fill="none" opacity="0.25"/>
               <path d="M4 12a8 8 0 018-8" stroke="currentColor" stroke-width="3" fill="none"/>
             </svg>
-            <span x-show="!enviando">Confirmar e salvar esqueleto</span>
+            <span x-show="!enviando" x-text="textoBotaoConfirmar"></span>
             <span x-show="enviando">Salvando e extraindo...</span>
           </button>
         </div>

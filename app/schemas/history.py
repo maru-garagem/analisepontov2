@@ -35,3 +35,6 @@ class HistoryDetailResponse(HistoryItem):
     resultado_json: dict[str, Any] | None = None
     custo_estimado_usd: float | None = None
     webhook_enviado: bool = False
+    # Truncado em 500 chars no banco. Útil pra debug — quando o webhook
+    # falha, o operador vê o motivo (status HTTP do receptor, erro de rede).
+    webhook_resposta: str | None = None

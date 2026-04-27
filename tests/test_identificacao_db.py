@@ -21,6 +21,7 @@ def _fp(hash_: str) -> FingerprintInfo:
         page_size=(595, 842),
         max_colunas=6,
         raw_canonical="canonical",
+        versao="v2",
     )
 
 
@@ -147,3 +148,39 @@ def test_esqueleto_inativo_nao_e_usado(db_session):
         r = identificar_empresa(b"pdf", db_session)
     assert r.esqueleto is None
     assert r.match_type == "nenhum"
+
+
+def test_match_por_fingerprint_em_lista_extra(db_session):
+    """
+    Match deve acontecer mesmo se o fingerprint NÃO for o principal,
+    desde que esteja em `Esqueleto.fingerprints` (lista). Cobre o caso
+    "operador anexou fingerprint à versão atual" (decisão 2b).
+    """
+    empresa = Empresa(nome="ACME")
+    db_session.add(empresa)
+    db_session.flush()
+    db_session.add(EmpresaCNPJ(empresa_id=empresa.id, cnpj="11222333000181"))
+    esq = Esqueleto(
+        empresa_id=empresa.id,
+        versao=1,
+        status=StatusEsqueleto.ATIVO.value,
+        fingerprint="principal00000000",
+        # O fingerprint do PDF que vai chegar está apenas na lista
+        # secundária — o "principal" é diferente.
+        fingerprints=["principal00000000", "secundario1111111"],
+        estrutura={},
+        exemplos_validados=[],
+    )
+    db_session.add(esq)
+    db_session.commit()
+
+    t1, t2 = _patch_extracao(
+        "Empresa ACME CNPJ 11.222.333/0001-81",
+        "secundario1111111",
+    )
+    with t1, t2:
+        r = identificar_empresa(b"pdf", db_session)
+    assert r.esqueleto is not None
+    assert r.esqueleto.id == esq.id
+    # match_type vira "exato" porque CNPJ + esqueleto da mesma empresa.
+    assert r.match_type == "exato"

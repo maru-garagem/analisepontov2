@@ -100,9 +100,15 @@ def _disparar_webhook_se_configurado(db: Session, processamento_id: uuid.UUID) -
     if proc.status not in estados_finais:
         return
 
+    # Payload do webhook — campos essenciais primeiro (id, nome_arquivo,
+    # IDs externos), depois resultado e metadados. O receptor pode usar
+    # `id_processo`+`id_documento` para correlacionar com o sistema de
+    # origem; `nome_arquivo` é útil para auditoria humana ("qual PDF
+    # gerou este resultado?").
     payload = {
         "processing_id": str(proc.id),
         "status": proc.status,
+        "nome_arquivo": proc.nome_arquivo_original,
         "id_processo": proc.id_processo,
         "id_documento": proc.id_documento,
         "empresa_id": str(proc.empresa_id) if proc.empresa_id else None,
@@ -111,6 +117,7 @@ def _disparar_webhook_se_configurado(db: Session, processamento_id: uuid.UUID) -
         "score_conformidade": proc.score_conformidade,
         "resultado_json": proc.resultado_json,
         "tempo_processamento_ms": proc.tempo_processamento_ms,
+        "criado_em": proc.criado_em.isoformat() if proc.criado_em else None,
     }
     ok, resposta = enviar_webhook(webhook_url, payload)
     proc.webhook_enviado = ok
@@ -196,8 +203,17 @@ def _fluxo_rapido(db: Session, processamento_id, pdf_bytes, ident, inicio) -> No
         calcular_score_detalhado,
     )
 
+    # Lê override pontual de modelo barato vindo do upload (form
+    # `modelo_barato` no /api/extract). Não persistente — vale só para
+    # esta extração específica, não muda o esqueleto.
+    meta = storage.get_metadata(str(processamento_id))
+    modelo_barato_override = meta.get("modelo_barato")
+
     try:
-        resultado = aplicar_esqueleto(pdf_bytes, ident.esqueleto)
+        resultado = aplicar_esqueleto(
+            pdf_bytes, ident.esqueleto,
+            modelo_barato_override=modelo_barato_override,
+        )
     except PontoExtractError as exc:
         _atualizar(
             db, processamento_id,

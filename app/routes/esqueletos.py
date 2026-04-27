@@ -33,6 +33,7 @@ def _serializar(s: Esqueleto, db: Session) -> EsqueletoDetail:
         versao=s.versao,
         status=s.status,
         fingerprint=s.fingerprint,
+        fingerprints=list(s.fingerprints or []),
         estrutura=s.estrutura or {},
         exemplos_validados=s.exemplos_validados or [],
         taxa_sucesso=s.taxa_sucesso,

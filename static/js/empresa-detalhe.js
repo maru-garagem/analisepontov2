@@ -101,10 +101,18 @@
     for (const s of esqueletos) {
       const tr = document.createElement('tr');
       tr.className = 'border-t border-slate-200';
+      // Conta fingerprints adicionais. Mostra "+N" quando há mais de 1
+      // fingerprint registrado nesta versão — sinal de que o operador já
+      // confirmou que diferentes fingerprints pertencem ao mesmo layout.
+      const fps = s.fingerprints || [];
+      const fpsExtras = fps.filter((f) => f && f !== s.fingerprint);
+      const fpExtraTag = fpsExtras.length > 0
+        ? `<span class="ml-1 inline-block px-1 rounded bg-blue-100 text-blue-700 text-[10px] font-medium" title="Fingerprints adicionais: ${escapeAttr(fpsExtras.join(', '))}">+${fpsExtras.length}</span>`
+        : '';
       tr.innerHTML = `
         <td class="px-3 py-2">v${s.versao}</td>
         <td class="px-3 py-2 text-xs"><span class="inline-block px-2 py-0.5 rounded-full ${badgeStatus(s.status)}">${escapeHtml(s.status)}</span></td>
-        <td class="px-3 py-2 font-mono text-xs">${escapeHtml(s.fingerprint.slice(0, 12))}…</td>
+        <td class="px-3 py-2 font-mono text-xs">${escapeHtml(s.fingerprint.slice(0, 12))}…${fpExtraTag}</td>
         <td class="px-3 py-2">${Math.round((s.taxa_sucesso || 0) * 100)}%</td>
         <td class="px-3 py-2">${s.total_extracoes}</td>
         <td class="px-3 py-2 text-xs">${new Date(s.criado_em).toLocaleString('pt-BR')}</td>
@@ -223,13 +231,24 @@
 
     const card = document.createElement('div');
     card.className = 'bg-white rounded-lg shadow-xl max-w-3xl w-full my-10 p-6';
+    const fpsAll = dados.fingerprints || [];
+    const fpExtras = fpsAll.filter((f) => f && f !== dados.fingerprint);
+    const fpExtrasHtml = fpExtras.length
+      ? `<details class="mt-1 text-xs">
+           <summary class="cursor-pointer text-slate-600 hover:text-slate-900">${fpExtras.length} fingerprint(s) adicionais aceito(s)</summary>
+           <ul class="mt-1 ml-4 list-disc text-slate-600 font-mono text-xs">
+             ${fpExtras.map((f) => `<li>${escapeHtml(f)}</li>`).join('')}
+           </ul>
+         </details>`
+      : '';
     card.innerHTML = `
       <div class="flex items-center justify-between mb-4">
         <h3 class="text-lg font-medium">Esqueleto v${dados.versao} — ${escapeHtml(dados.empresa_nome || '')}</h3>
         <button class="text-slate-500 hover:text-slate-900 text-2xl leading-none" data-close>&times;</button>
       </div>
-      <p class="text-xs text-slate-500 mb-2">Fingerprint: <code>${escapeHtml(dados.fingerprint)}</code></p>
-      <label class="block text-sm mb-2">Estrutura</label>
+      <p class="text-xs text-slate-500 mb-1">Fingerprint principal: <code>${escapeHtml(dados.fingerprint)}</code></p>
+      ${fpExtrasHtml}
+      <label class="block text-sm mb-2 mt-3">Estrutura</label>
       <textarea id="estrutura" rows="14" class="w-full border border-slate-300 rounded px-3 py-2 text-xs font-mono"></textarea>
       <p id="estruturaErro" class="mt-1 text-xs text-red-600"></p>
       <div class="flex justify-end gap-2 mt-4">
@@ -274,6 +293,7 @@
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
     })[c]);
   }
+  function escapeAttr(s) { return escapeHtml(s); }
 
   carregar();
 })();

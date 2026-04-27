@@ -12,6 +12,7 @@ Se você só quer saber **como** o código funciona, veja o [`README.md`](./READ
 - [Decisões de arquitetura](#decisões-de-arquitetura)
   - [Esqueletos por empresa](#1-esqueletos-por-empresa)
   - [Fingerprint como chave secundária](#2-fingerprint-como-chave-secundária-de-matching)
+  - [Múltiplos fingerprints por esqueleto](#2b-múltiplos-fingerprints-por-esqueleto-defesa-em-profundidade)
   - [FastAPI sync](#3-fastapi-sync-não-async)
   - [BackgroundTasks em vez de Celery](#4-backgroundtasks-em-vez-de-celery)
   - [Storage efêmero em memória](#5-storage-efêmero-em-memória-não-redis)
@@ -64,22 +65,49 @@ Essa hipótese é o pilar da v2. Se ela se verificar na prática (um esqueleto a
 
 ### 2. Fingerprint como chave secundária de matching
 
-**O que:** além do CNPJ, identificamos esqueletos por um hash SHA-256[:16] do layout do PDF — SHA sobre texto estável da 1ª página (sem dígitos/nomes/datas) + nº de colunas da maior tabela + dimensões da página.
+**O que:** além do CNPJ, identificamos esqueletos por um hash SHA-256[:16] do layout do PDF.
 
 **Por quê (duas razões):**
 
 1. **Empresa com múltiplas filiais** — mesmo layout, CNPJs diferentes. Fingerprint igual → um esqueleto cobre todas.
-2. **Empresa que troca de sistema de ponto** — mesmo CNPJ, layout diferente. Fingerprint novo → nova versão de esqueleto (e a anterior é desativada).
+2. **Empresa que troca de sistema de ponto** — mesmo CNPJ, layout diferente. Fingerprint novo → versão nova de esqueleto.
 
-**Alternativa considerada:** só CNPJ. Não funcionaria pra filiais nem pra troca de sistema.
+**Algoritmo (v2 — atual):**
 
-**Alternativa considerada:** fingerprint perceptual da imagem (pHash). Rejeitado porque muda entre PDFs digitais e escaneados, e porque a variação de layout dentro de uma "impressão" do mesmo sistema é alta.
+1. Texto **acima da primeira tabela detectada** (cabeçalho do documento — não os dados das linhas).
+2. Tokens da **WHITELIST de labels estruturais** (`entrada`, `saída`, `funcionário`, `matrícula`, etc).
+3. Header da **MAIOR tabela** detectada (a tabela de dados — seu cabeçalho é o sinal de layout mais estável).
+4. Dimensões da página + nº de colunas da maior tabela.
+5. SHA-256[:16] sobre tudo isso, prefixado com `v2:` para permitir invalidações futuras.
 
-**Alternativa considerada:** incluir todo o texto no hash. Descartado porque o texto da tabela muda entre PDFs (datas, horários, nomes), quebrando o fingerprint.
+**Por que mudou de v1 para v2 (lição aprendida no QA 25/04):**
 
-**Por que whitelist:** só palavras em `WHITELIST` (labels estáveis de cartão de ponto — `entrada`, `saída`, `jornada`, `funcionário`, `matrícula`, ~80 termos) entram no hash. O restante do texto é variável e polui.
+A v1 punha no hash o texto da página inteira da pg1, com WHITELIST mais ampla (incluía `ano`, `feriado`, `folga`, `falta`, `extra`, `abono`...). Esses termos aparecem como **conteúdo** das linhas — ex: "Feriado: Ano novo" só aparece em janeiro. Resultado: o mesmo cartão de ponto da CENEGED tinha fingerprint diferente em jan/22 vs set/21, porque jan tem "Ano novo" e set não. Isso fazia a empresa virar esqueletos sucessivos a cada mês, e o usuário caía em cadastro assistido toda vez.
 
-**Quando reconsiderar:** se encontrarmos empresas diferentes com fingerprint colidente (raro pela whitelist + dimensões + colunas), podemos expandir a whitelist ou adicionar mais sinais.
+A v2 corrige cortando:
+- texto à área **acima da primeira tabela** (deixa fora os dados),
+- WHITELIST aos labels que só aparecem em headers (sem os termos que aparecem como dados),
+- header só da **maior** tabela (não da 1ª — pdfplumber detecta tabelas em ordens diferentes em PDFs sutilmente diferentes, então "1ª" não é estável).
+
+Validado nos 3 PDFs CENEGED do QA: jan/22, set/21 e jan/21 agora têm fingerprint **idêntico** (`2b19cb54e9742c90`), e os 3 outros PDFs do QA (Rede D'Or, Hallen, Itaú) têm fingerprints distintos.
+
+**Quando reconsiderar:** colisão entre empresas diferentes com fingerprint igual (improvável pela whitelist + headers + dimensões). Reconsiderar também se aparecer caso onde a "maior tabela" do pdfplumber é instável — fallback seria voltar pra todos os headers ou usar critério estatístico.
+
+---
+
+### 2b. Múltiplos fingerprints por esqueleto (defesa em profundidade)
+
+**O que:** cada esqueleto tem um fingerprint principal (`Esqueleto.fingerprint`) **e** uma lista de fingerprints adicionais aceitos (`Esqueleto.fingerprints`). O matching considera todos.
+
+**Por quê:** mesmo com a v2 do fingerprint estabilizada, há cenários onde a heurística pode flutuar (versão nova do gerador de PDF da empresa, mudança sutil de margens, etc.). Em vez de criar nova versão de esqueleto a cada flutuação (e desativar a anterior — looping de cadastros), oferecemos ao operador a opção de **anexar** o novo fingerprint à versão atual.
+
+**Como funciona na UX:** quando um PDF cai em cadastro assistido com CNPJ que já tem esqueleto ativo, a tela mostra dois caminhos:
+- **Anexar layout à versão atual** (default, recomendado): salva o fingerprint na lista da v-ativa e atualiza a estrutura. Sem nova versão.
+- **Criar nova versão**: comportamento antigo. Use quando o layout realmente mudou (empresa trocou de sistema).
+
+**Trade-off aceito:** se o operador anexar errado (era layout diferente), a estrutura da versão ativa pode ficar mal calibrada para os PDFs antigos. Mitigação: a estrutura é sobrescrita com o que o operador acabou de validar visualmente — então o novo PDF extrai bem; PDFs antigos podem cair na cascata de fallback (OCR / IA barata).
+
+**Quando reconsiderar:** se aparecerem casos em que múltiplos fingerprints anexados quebram a extração de versões antigas, considerar guardar uma estrutura por fingerprint dentro do esqueleto, ou voltar para o paradigma de "uma versão por fingerprint".
 
 ---
 
@@ -208,27 +236,31 @@ Cada entrada tem `id` + `suporta_visao` (bool).
 
 ---
 
-### 10. Cascata de fallback: plumber → OCR → IA barata
+### 10. Cascata de fallback: plumber → OCR → IA barata → completar_data
 
-**O que:** em `app/services/extracao_esqueleto.py::aplicar_esqueleto`, três tentativas gatilhadas pela qualidade da anterior:
+**O que:** em `app/services/extracao_esqueleto.py::aplicar_esqueleto`, três tentativas gatilhadas pela qualidade da anterior, mais uma fase de pós-processamento:
 
 1. Método preferencial do esqueleto
-2. OCR guiado — se plumber deu ruim E PDF parece escaneado
+2. OCR guiado — se plumber deu ruim **E** (PDF parece escaneado **OU** o diagnóstico é `linhas_em_celula_unica` / `colunas_tipadas_todas_vazias`)
 3. IA barata — se ainda está ruim
+4. Pós-processamento: `parsing.completar_data_do_periodo` (se configurado)
 
 **Por que automático:** PDFs são imprevisíveis. Mesmo um layout conhecido pode vir ruim hoje (compressão diferente, escaneado por acidente, etc.). Tentar só o método declarado e falhar é ruim — tentar os outros antes de desistir é o certo.
 
 **Como decide "está ruim"** (`_diagnostica_extracao`):
 
-- `zero_linhas`: óbvio
-- `colunas_tipadas_todas_vazias`: plumber achou a tabela mas os valores de hora/data vieram todos vazios → sinal clássico de que a tabela foi detectada errado
-- `maioria_linhas_com_1_celula`: >70% das linhas com só 1 célula preenchida e pelo menos 3 linhas → é ruído, não tabela
+- `zero_linhas`: óbvio.
+- `colunas_tipadas_todas_vazias`: plumber achou a tabela mas os valores de hora/data vieram todos vazios → sinal clássico de que a tabela foi detectada errado.
+- `linhas_em_celula_unica` (novo): tabela declara ≥3 colunas mas TODAS as linhas extraídas têm 0–1 célula significativa → plumber colapsou a tabela inteira numa coluna só (caso clássico do espelho de ponto Itaú e da Rede D'Or, onde a tabela é posicional sem grade visível).
+- `maioria_linhas_com_1_celula`: >70% das linhas com só 1 célula preenchida e pelo menos 3 linhas → ruído, não tabela.
 
-**Por que essas três:** antes tínhamos só `zero_linhas`. Isso permitia plumber extrair 2 linhas de 30 e nunca cair no fallback. Os outros dois sinais cobrem "extração parcial quebrada".
+**Por que OCR mesmo em PDF digital (mudança 25/04):** antes, o fallback OCR só rodava se `parece_pdf_escaneado` retornasse True. Mas PDFs digitais com tabela posicional sem grade (Itaú, Rede D'Or) também precisam de OCR — o pdfplumber lê o texto digital mas não consegue agrupar em colunas. Hoje OCR também é tentado quando `linhas_em_celula_unica` ou `colunas_tipadas_todas_vazias`.
 
-**Preservação de cabeçalho:** na cascata, se um método novo vier com cabeçalho vazio mas o anterior tinha cabeçalho populado, mantemos o anterior. Evita perder informação útil.
+**Anti-regressão na cascata:** se OCR ou IA traz menos/igual linhas que o método anterior, mantemos o anterior e registramos no aviso. Evita aceitar degradação.
 
-**Anti-regressão nas linhas:** se a IA barata traz **menos** linhas que o método anterior, mantemos o anterior e registramos no aviso. A IA pode errar pra baixo — não queremos aceitar degradação.
+**Preservação de cabeçalho:** se um método novo vier com cabeçalho vazio mas o anterior tinha cabeçalho populado, mantemos o anterior. Cabeçalho extraído por regex no plumber tipicamente é mais preciso que pelo OCR.
+
+**Pós-processamento `completar_data_do_periodo` (novo):** alguns layouts (caso clássico Hallen) listam só o DIA na linha (`21, 22, 23...`) e o período completo no cabeçalho (`Período: 21/12/2015 - 20/01/2016`). A regra do esqueleto extrai os 6 grupos do período via regex, e para cada linha decide o mês/ano correto pelo dia (`>=dia_inicio` → bloco inicial; senão, bloco fim). Saída: data completa em `coluna_destino`. Configurável no JSON do esqueleto, com UI dedicada na tela de cadastro (3 inputs nomeados em vez de JSON cru).
 
 ---
 
@@ -302,6 +334,8 @@ Frustrante de debugar e frágil.
 
 **Regra extra:** cadastro assistido **não dispara webhook**, nem o upload inicial, nem após a confirmação do cadastro. Justificativa: cadastro é "trabalho humano em progresso", não um evento para publicar. Se o checkbox estiver marcado e o PDF cair em cadastro, a URL é **removida do storage** para não disparar mesmo se o user confirmar depois.
 
+**Payload (atualizado em 25/04):** inclui `nome_arquivo` (nome original do PDF) e `criado_em` (timestamp ISO 8601). Antes só carregava `processing_id`, `id_processo`, `id_documento` — operadores reportaram dificuldade pra correlar "qual PDF gerou este resultado". Adicionar `nome_arquivo` é trivial e cobre o caso. `criado_em` ajuda em integrações que organizam por janelas temporais. Ver README — Webhooks.
+
 ---
 
 ### 15. Python entrypoint em vez de shell
@@ -342,6 +376,26 @@ Essa divisão é consistente no código. Ao criar coisas novas, siga.
 ## Decisões que mudamos no caminho (lições aprendidas)
 
 Boas engenharias documentam onde erraram. Aqui está o que foi revisado.
+
+### Fingerprint v1 → v2 (QA 25/04)
+
+**Era assim:** SHA do texto da página inteira da pg1, com WHITELIST larga (`ano`, `feriado`, `folga`, `falta`, `extra`, `abono`, `dia`, etc), incluindo qualquer label estrutural que aparecesse no PDF.
+
+**Problema descoberto no QA:** o mesmo cartão de ponto da CENEGED em meses diferentes gerava fingerprints diferentes. Causa: o token `ano` estava na whitelist e aparecia em "Feriado: Ano novo" — só presente em PDFs de janeiro. Mudava o set de tokens, mudava o hash. Cada upload mensal disparava cadastro assistido novo, criando v+1 e desativando a anterior. Quando o usuário subia de novo o primeiro PDF, ele não batia mais (esqueleto v1 estava INATIVO) e pedia cadastro pela 3ª vez.
+
+**Fix em 3 frentes:**
+
+1. **Texto restrito ao topo da página** (`_texto_acima_da_primeira_tabela`): só o cabeçalho do documento entra no hash, os dados das linhas ficam de fora.
+2. **WHITELIST podada**: removidos termos que aparecem como conteúdo (`ano`, `feriado(s)`, `folga(s)`, `falta(s)`, `extra(s)`, `abono(s)`, `atestado(s)`, `desconto(s)`, `dia`, `dias`, `mes`, `mês`, `semana`, `data`, `adicional`).
+3. **Header só da MAIOR tabela** (e não da 1ª): a "1ª tabela" não é estável entre PDFs de mesmo layout (pdfplumber detecta na ordem com pequenas variações). A maior é o cartão real, sempre o mesmo.
+4. **Versionamento explícito**: o canonical agora começa com `v2:`. Bumps futuros invalidam fingerprints antigos sem migração.
+5. **Múltiplos fingerprints por esqueleto**: defesa em profundidade — quando um PDF cai em cadastro com fingerprint diferente mas o operador valida que é o mesmo layout, anexa em vez de versionar (ver decisão 2b).
+
+**Validação:** os 3 PDFs CENEGED do QA (jan/22, set/21, jan/21) agora têm fingerprint idêntico. Os outros 3 PDFs (Rede D'Or, Hallen, Itaú) têm fingerprints distintos sem colisão.
+
+**Lição:** fingerprint estrutural só serve se for derivado SÓ de estrutura. Misturar conteúdo no hash é convidar instabilidade. Quando viu "tokens diferentes mês a mês", olhar com lupa para POR QUE estão diferentes — a resposta tipicamente revela uma fronteira mal posta entre estrutura e dado.
+
+---
 
 ### `railway.toml startCommand` vs `Dockerfile CMD`
 

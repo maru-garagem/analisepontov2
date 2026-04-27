@@ -31,6 +31,7 @@
           <th class="px-3 py-2 font-medium">Data</th>
           <th class="px-3 py-2 font-medium">Arquivo</th>
           <th class="px-3 py-2 font-medium">Empresa</th>
+          <th class="px-3 py-2 font-medium">IDs ext.</th>
           <th class="px-3 py-2 font-medium">Método</th>
           <th class="px-3 py-2 font-medium">Status</th>
           <th class="px-3 py-2 font-medium">Score</th>
@@ -44,10 +45,17 @@
       const tr = document.createElement('tr');
       tr.className = 'border-t border-slate-200';
       const badgeClass = badgeFor(i.status);
+      const idsExt = (i.id_processo || i.id_documento)
+        ? `<span title="processo: ${escapeAttr(i.id_processo || '—')} / documento: ${escapeAttr(i.id_documento || '—')}">
+             ${escapeHtml(i.id_processo || '—')}<br>
+             <span class="text-slate-400">${escapeHtml(i.id_documento || '')}</span>
+           </span>`
+        : '<span class="text-slate-400">—</span>';
       tr.innerHTML = `
         <td class="px-3 py-2 text-xs whitespace-nowrap">${new Date(i.criado_em).toLocaleString('pt-BR')}</td>
         <td class="px-3 py-2 truncate max-w-[14rem]" title="${escapeAttr(i.nome_arquivo_original)}">${escapeHtml(i.nome_arquivo_original)}</td>
         <td class="px-3 py-2">${escapeHtml(i.empresa_nome || '—')}</td>
+        <td class="px-3 py-2 text-xs">${idsExt}</td>
         <td class="px-3 py-2 text-xs">${escapeHtml(i.metodo_usado || '—')}</td>
         <td class="px-3 py-2 text-xs"><span class="inline-block px-2 py-0.5 rounded-full ${badgeClass}">${escapeHtml(i.status)}</span></td>
         <td class="px-3 py-2">${typeof i.score_conformidade === 'number' ? Math.round(i.score_conformidade * 100) + '%' : '—'}</td>
@@ -136,6 +144,29 @@
     const linhas = data.resultado_json?.linhas || [];
     const cols = linhas[0] ? Object.keys(linhas[0]) : [];
 
+    // Bloco webhook só aparece se foi disparado.
+    const temWebhook = data.webhook_enviado || data.webhook_resposta;
+    const webhookHtml = temWebhook
+      ? `
+        <div class="mt-3 p-3 rounded border ${data.webhook_enviado ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}">
+          <div class="flex items-center justify-between">
+            <span class="text-sm font-medium ${data.webhook_enviado ? 'text-green-800' : 'text-red-800'}">
+              Webhook ${data.webhook_enviado ? 'enviado' : 'falhou'}
+            </span>
+          </div>
+          ${data.webhook_resposta ? `<pre class="mt-2 text-xs overflow-x-auto whitespace-pre-wrap text-slate-700">${escapeHtml(data.webhook_resposta)}</pre>` : ''}
+        </div>`
+      : '';
+
+    // Bloco IDs externos só aparece se algum foi informado.
+    const temIds = data.id_processo || data.id_documento;
+    const idsHtml = temIds
+      ? `
+        <dt class="text-slate-500">ID processo</dt><dd>${escapeHtml(data.id_processo || '—')}</dd>
+        <dt class="text-slate-500">ID documento</dt><dd>${escapeHtml(data.id_documento || '—')}</dd>
+        `
+      : '';
+
     card.innerHTML = `
       <div class="flex items-center justify-between mb-4">
         <h3 class="text-lg font-medium">Detalhes do processamento</h3>
@@ -148,8 +179,10 @@
         <dt class="text-slate-500">Status</dt><dd>${escapeHtml(data.status)}</dd>
         <dt class="text-slate-500">Score</dt><dd>${typeof data.score_conformidade === 'number' ? Math.round(data.score_conformidade * 100) + '%' : '—'}</dd>
         <dt class="text-slate-500">Tempo</dt><dd>${data.tempo_processamento_ms ?? '—'} ms</dd>
+        ${idsHtml}
       </dl>
-      <h4 class="font-medium text-sm mb-1">Cabeçalho</h4>
+      ${webhookHtml}
+      <h4 class="font-medium text-sm mb-1 mt-4">Cabeçalho</h4>
       <pre class="bg-slate-50 rounded p-2 text-xs mb-4 overflow-x-auto">${escapeHtml(JSON.stringify(data.resultado_json?.cabecalho ?? {}, null, 2))}</pre>
       <h4 class="font-medium text-sm mb-1">Linhas (${linhas.length})</h4>
       <div class="overflow-x-auto"></div>

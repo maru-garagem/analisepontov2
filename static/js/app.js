@@ -30,8 +30,9 @@
     } catch {}
   }
 
-  // Popula dropdown de modelo + toggle de webhook
+  // Popula dropdowns de modelo (potente + barato) + toggle de webhook
   const modeloSelect = document.getElementById('modeloSelect');
+  const modeloBaratoSelect = document.getElementById('modeloBaratoSelect');
   const webhookToggle = document.getElementById('webhookToggle');
   const enviarWebhookCb = document.getElementById('enviarWebhook');
   try {
@@ -45,10 +46,34 @@
       opt.textContent = m.id + (anotacoes.length ? ` (${anotacoes.join(', ')})` : '');
       modeloSelect.appendChild(opt);
     }
+    for (const m of data.modelos_baratos || []) {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      const anotacoes = [];
+      if (m.id === data.padrao_barato) anotacoes.push('padrão');
+      if (m.suporta_visao === false) anotacoes.push('sem visão');
+      opt.textContent = m.id + (anotacoes.length ? ` (${anotacoes.join(', ')})` : '');
+      modeloBaratoSelect.appendChild(opt);
+    }
     if (data.webhook_disponivel) {
       webhookToggle.classList.remove('hidden');
     }
   } catch {}
+
+  // IDs externos (id_processo, id_documento) — persiste em sessionStorage
+  // pra reusar em uploads múltiplos sem o usuário redigitar.
+  const idProcessoInput = document.getElementById('idProcesso');
+  const idDocumentoInput = document.getElementById('idDocumento');
+  try {
+    idProcessoInput.value = sessionStorage.getItem('upload_id_processo') || '';
+    idDocumentoInput.value = sessionStorage.getItem('upload_id_documento') || '';
+  } catch {}
+  idProcessoInput.addEventListener('change', () => {
+    sessionStorage.setItem('upload_id_processo', idProcessoInput.value.trim());
+  });
+  idDocumentoInput.addEventListener('change', () => {
+    sessionStorage.setItem('upload_id_documento', idDocumentoInput.value.trim());
+  });
 
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
@@ -202,6 +227,12 @@
     fd.append('file', file);
     const modelo = modeloSelect.value;
     if (modelo) fd.append('modelo_potente', modelo);
+    const modeloBarato = modeloBaratoSelect.value;
+    if (modeloBarato) fd.append('modelo_barato', modeloBarato);
+    const idProc = (idProcessoInput.value || '').trim();
+    if (idProc) fd.append('id_processo', idProc);
+    const idDoc = (idDocumentoInput.value || '').trim();
+    if (idDoc) fd.append('id_documento', idDoc);
     if (enviarWebhookCb && enviarWebhookCb.checked) {
       fd.append('enviar_webhook', 'true');
     }

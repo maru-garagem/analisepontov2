@@ -47,15 +47,60 @@ class TabelaSpec(BaseModel):
     colunas: list[ColunaTabela] = Field(default_factory=list)
     linhas_descartar_regex: list[str] = Field(default_factory=list)
     header_row_regex: str | None = None
+    # Settings opcionais passados direto pro `pdfplumber.Page.extract_tables`.
+    # Útil quando o layout não tem grade visível e precisa de
+    # `vertical_strategy="text"` etc. None = settings default do pdfplumber.
+    table_settings: dict[str, Any] | None = None
 
 
 # --- Parsing -----------------------------------------------------------
+
+class CompletarDataDoPeriodoSpec(BaseModel):
+    """
+    Quando o cartão lista apenas o DIA (ex: `21, 22, 23, ...`) e o período
+    completo está no cabeçalho (ex: `21/12/2015 - 20/01/2016`), esta regra
+    instrui o parser a montar a data completa por linha.
+
+    Algoritmo:
+    1. Lê `campo_periodo` do cabeçalho extraído.
+    2. Aplica `regex_periodo` para extrair (dia_inicio, mes_inicio, ano_inicio,
+       dia_fim, mes_fim, ano_fim).
+    3. Para cada linha, lê `coluna_dia` (string) e converte para int.
+    4. Se dia >= dia_inicio → mês/ano = (mes_inicio, ano_inicio).
+       Senão → mês/ano = (mes_fim, ano_fim).
+    5. Grava a data completa em `coluna_destino` (formato DD/MM/YYYY).
+
+    `coluna_destino` pode ser igual a `coluna_dia` (sobrescreve) ou nome
+    novo (preserva o original).
+    """
+    campo_periodo: str = Field(
+        description="Nome do campo de cabeçalho que contém o período (ex: 'periodo')."
+    )
+    coluna_dia: str = Field(
+        description="Nome da coluna da tabela com o DIA isolado (ex: 'dia')."
+    )
+    coluna_destino: str = Field(
+        description="Nome da coluna onde gravar a data completa (ex: 'data')."
+    )
+    regex_periodo: str = Field(
+        default=r"(\d{1,2})/(\d{1,2})/(\d{2,4})\s*[-aàté]+\s*(\d{1,2})/(\d{1,2})/(\d{2,4})",
+        description=(
+            "Regex com 6 grupos: (dia_ini, mes_ini, ano_ini, dia_fim, mes_fim, "
+            "ano_fim). Default cobre formatos comuns ('DD/MM/AAAA - DD/MM/AAAA',"
+            " 'DD/MM/AAAA a DD/MM/AAAA', 'DD/MM/AAAA até DD/MM/AAAA')."
+        ),
+    )
+
 
 class ParsingSpec(BaseModel):
     celula_vazia_valor: Any = None
     formato_hora: str = "HH:MM"
     formato_data: str = "DD/MM/YYYY"
     ano_default: int | None = None
+    # Quando declarado, o pipeline pós-extração combina o DIA da linha com
+    # o PERÍODO do cabeçalho para gerar a data completa. Útil em cartões
+    # que só listam o dia. Ver CompletarDataDoPeriodoSpec acima.
+    completar_data_do_periodo: CompletarDataDoPeriodoSpec | None = None
 
 
 # --- Estrutura completa ------------------------------------------------

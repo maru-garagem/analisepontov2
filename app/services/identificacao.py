@@ -127,7 +127,19 @@ def identificar_empresa(pdf_bytes: bytes, db: Session) -> ResultadoIdentificacao
 
     fp = gerar_fingerprint(pdf_bytes)
 
-    # 1) Matching por fingerprint (esqueleto ativo)
+    # 1) Matching por fingerprint (esqueleto ativo).
+    #
+    # Match acontece se `fp.hash` está em qualquer um destes:
+    #   a) `Esqueleto.fingerprint` (o "principal" — campo legado, indexado)
+    #   b) `Esqueleto.fingerprints` (lista — adicionada quando o operador
+    #      confirma que outro layout pertence à mesma versão; cobre
+    #      flutuações naturais do fingerprint entre PDFs do mesmo layout).
+    #
+    # Estratégia: query rápida por igualdade no `fingerprint` (usa índice);
+    # se não bate, busca esqueletos ativos da empresa por CNPJ e checa em
+    # Python se o hash está em alguma lista. JSON contains varia por dialeto
+    # (jsonb @> em Postgres, json_each em SQLite) — fazer em Python é mais
+    # portátil para a escala atual (~dezenas de empresas).
     esqueleto_por_fp = (
         db.query(Esqueleto)
         .filter(Esqueleto.fingerprint == fp.hash)
@@ -135,6 +147,26 @@ def identificar_empresa(pdf_bytes: bytes, db: Session) -> ResultadoIdentificacao
         .order_by(Esqueleto.versao.desc())
         .first()
     )
+
+    if esqueleto_por_fp is None and cnpj_principal:
+        ec_temp = (
+            db.query(EmpresaCNPJ)
+            .filter(EmpresaCNPJ.cnpj == cnpj_principal)
+            .first()
+        )
+        if ec_temp is not None:
+            candidatos = (
+                db.query(Esqueleto)
+                .filter(Esqueleto.empresa_id == ec_temp.empresa_id)
+                .filter(Esqueleto.status == StatusEsqueleto.ATIVO.value)
+                .order_by(Esqueleto.versao.desc())
+                .all()
+            )
+            for cand in candidatos:
+                fps_extra = cand.fingerprints or []
+                if fp.hash in fps_extra:
+                    esqueleto_por_fp = cand
+                    break
 
     # 2) Matching por CNPJ
     empresa_por_cnpj: Optional[Empresa] = None

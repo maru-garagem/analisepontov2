@@ -84,6 +84,7 @@ def get_empresa(
                 versao=s.versao,
                 status=s.status,
                 fingerprint=s.fingerprint,
+                fingerprints=list(s.fingerprints or []),
                 taxa_sucesso=s.taxa_sucesso,
                 total_extracoes=s.total_extracoes,
                 criado_em=s.criado_em,

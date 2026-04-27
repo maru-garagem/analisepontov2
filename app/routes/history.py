@@ -138,4 +138,5 @@ def get_history_item(
         resultado_json=p.resultado_json,
         custo_estimado_usd=p.custo_estimado_usd,
         webhook_enviado=p.webhook_enviado,
+        webhook_resposta=p.webhook_resposta,
     )
